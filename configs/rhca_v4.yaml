@@ -1,0 +1,92 @@
+# RHCA v4 — rolling-frontier configuration.
+#
+# Blocks merge over `base`; `--block` selects which experiment block applies.
+# vocab_size in a model block is a placeholder; the CLI overrides it with the
+# corpus's true vocabulary at build time (it is only read directly by the RFK
+# kernels, which build a model without a corpus).
+
+default_block: smoke
+
+base:
+  seed: 0
+  device: auto
+  precision: bf16
+  data:
+    name: procedural
+    vocab_size: 512
+
+# ── tiny smoke config: fast end-to-end sanity, no downloads ──────────────────
+smoke:
+  model:
+    name: rhca
+    vocab_size: 512
+    field_dim: 128
+    latent_dim: 64
+    codebook: lowrank
+    codebook_factor_dim: 32
+    frontier_size: 16
+    max_commit: 4
+    memory_slots: 32
+    memory_read_top_k: 8
+    memory_write_top_k: 4
+    memory_write_temperature: 3.0
+    tail_size: 64
+    local_kernel_size: 5
+    max_hypotheses: 1
+    ssm_macro_steps: 2
+    ssm_scan_steps: 6
+    commit_entropy_threshold: 0.80
+    routing_balance_weight: 0.05
+  trainer:
+    name: rhca
+    lr: 3.0e-3
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+    segment_len: 16
+    max_train_windows: 2
+  run:
+    batch_size: 8
+    seq_len: 128
+    steps: 200
+
+# ── production v4: the architecture-review target spec (§5) ──────────────────
+# Codebook factorised (~8.8M vs 54.6M), K=4 UNSHARED deep macro steps, widened
+# mix MLP, 512-token SDPA tail, bounded carried-state training, bf16.
+# Requires a real corpus (WikiText-103) + datasets.
+production_v4:
+  model:
+    name: rhca
+    vocab_size: 32768
+    field_dim: 1024
+    latent_dim: 512
+    codebook: lowrank
+    codebook_factor_dim: 256
+    frontier_size: 32
+    max_commit: 8
+    memory_slots: 128
+    memory_read_top_k: 16
+    memory_write_top_k: 8
+    memory_write_temperature: 3.0
+    tail_size: 512
+    local_kernel_size: 7
+    max_hypotheses: 1
+    ssm_macro_steps: 4
+    ssm_scan_steps: 12
+    commit_entropy_threshold: 0.80
+    routing_balance_weight: 0.05
+  data:
+    name: wikitext103
+    bpe_vocab: 32768
+  trainer:
+    name: rhca
+    lr: 3.0e-4
+    warmup_steps: 1000
+    total_steps: 20000
+    grad_accum_steps: 4
+    segment_len: 32
+    max_train_windows: 2
+  run:
+    batch_size: 8
+    seq_len: 512
+    steps: 20000

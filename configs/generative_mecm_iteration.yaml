@@ -1,0 +1,794 @@
+# Iterative generative comparison:
+#   1. Transformer on SentencePiece BPE: baseline.
+#      - transformer_sentencepiece_smoke is the smallest pipeline check.
+#      - transformer_sentencepiece_matched_smoke is parameter-matched to MECM.
+#   2. MECM on SentencePiece BPE: architecture-only comparison.
+#   3. MECM on MultiGear: tokenizer + architecture comparison.
+#
+# Prepare data first:
+#   lmf pretokenize-edu-sentencepiece-bpe \
+#     --source-root /path/to/edu_combined \
+#     --output-root outputs/sentencepiece_bpe_prepared \
+#     --tokenizer-name sentencepiece_bpe_edu_subset_v1 \
+#     --vocab-size 4096 \
+#     --fraction 0.10 \
+#     --max-bpe-tokens-per-domain 200000
+#
+#   lmf pretokenize-edu-multigear \
+#     --source-root /path/to/edu_combined \
+#     --output-root outputs/multigear_prepared \
+#     --tokenizer-name multigear_edu_subset_v1 \
+#     --vocab-size 4096 \
+#     --fraction 0.10 \
+#     --max-bpe-tokens-per-domain 200000
+#
+#   lmf pretokenize-edu-multigear-prediction-aware \
+#     --source-root /path/to/edu_combined \
+#     --output-root outputs/multigear_prediction_aware_prepared \
+#     --tokenizer-name multigear_prediction_aware_edu_subset_v1 \
+#     --vocab-size 4096 \
+#     --fraction 0.10 \
+#     --max-bpe-tokens-per-domain 200000
+
+default_block: transformer_sentencepiece_smoke
+
+base:
+  seed: 0
+  device: auto
+  precision: bf16
+  data:
+    name: edu_combined
+    root: outputs/sentencepiece_bpe_prepared
+    tokenizer_name: sentencepiece_bpe_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 20
+
+transformer_sentencepiece_smoke:
+  model:
+    name: transformer
+    dim: 128
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+    hierarchical_output: false
+  trainer:
+    name: transformer
+    lr: 3.0e-4
+    warmup_steps: 5
+    total_steps: 20
+    grad_accum_steps: 1
+
+transformer_sentencepiece_matched_smoke:
+  model:
+    name: transformer
+    dim: 224
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+    hierarchical_output: false
+  trainer:
+    name: transformer
+    lr: 3.0e-4
+    warmup_steps: 5
+    total_steps: 20
+    grad_accum_steps: 1
+
+transformer_multigear_matched_pilot200:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prepared
+    tokenizer_name: multigear_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: transformer
+    dim: 224
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+    hierarchical_output: false
+  trainer:
+    name: transformer
+    lr: 3.0e-4
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mght_multigear_bias_pilot200:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prepared
+    tokenizer_name: multigear_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mght
+    dim: 224
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+    hierarchy_gears: 6
+    hierarchy_output_mode: bias
+    input_gear_embedding: true
+    hierarchy_aux_weight: 0.0
+  trainer:
+    name: mght
+    lr: 3.0e-4
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mght_multigear_factorized_pilot200:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prepared
+    tokenizer_name: multigear_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mght
+    dim: 224
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+    hierarchy_gears: 6
+    hierarchy_output_mode: factorized
+    input_gear_embedding: true
+    hierarchy_aux_weight: 0.0
+  trainer:
+    name: mght
+    lr: 3.0e-4
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mgcf_multigear_bias_pilot200:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prepared
+    tokenizer_name: multigear_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mgcf
+    dim: 210
+    layers: 3
+    kernel_size: 5
+    dilations: [1, 2, 4, 8]
+    memory_scales: [4, 16, 64]
+    memory_type: learned
+    memory_gate_init: 0.05
+    max_seq_len: 1024
+    hierarchy_gears: 6
+    input_gear_embedding: true
+    hierarchy_composition: true
+    byte_length_embedding: true
+    max_token_bytes: 64
+    composition_gate_init: 0.05
+    composition_aux_weight: 0.01
+    gear_aware_output: true
+    gear_output_mode: bias
+    gear_aux_weight: 0.0
+    token_embedding_init: merge_compositional
+  trainer:
+    name: mgcf
+    lr: 1.0e-3
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mgcf_multigear_factorized_pilot200:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prepared
+    tokenizer_name: multigear_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mgcf
+    dim: 210
+    layers: 3
+    kernel_size: 5
+    dilations: [1, 2, 4, 8]
+    memory_scales: [4, 16, 64]
+    memory_type: learned
+    memory_gate_init: 0.05
+    max_seq_len: 1024
+    hierarchy_gears: 6
+    input_gear_embedding: true
+    hierarchy_composition: true
+    byte_length_embedding: true
+    max_token_bytes: 64
+    composition_gate_init: 0.05
+    composition_aux_weight: 0.01
+    gear_aware_output: true
+    gear_output_mode: factorized
+    gear_aux_weight: 0.0
+    token_embedding_init: merge_compositional
+  trainer:
+    name: mgcf
+    lr: 1.0e-3
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mgcf_multigear_prediction_aware_bias_pilot200:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prediction_aware_prepared
+    tokenizer_name: multigear_prediction_aware_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mgcf
+    dim: 210
+    layers: 3
+    kernel_size: 5
+    dilations: [1, 2, 4, 8]
+    memory_scales: [4, 16, 64]
+    memory_type: learned
+    memory_gate_init: 0.05
+    max_seq_len: 1024
+    hierarchy_gears: 6
+    input_gear_embedding: true
+    hierarchy_composition: true
+    byte_length_embedding: true
+    max_token_bytes: 64
+    composition_gate_init: 0.05
+    composition_aux_weight: 0.01
+    gear_aware_output: true
+    gear_output_mode: bias
+    gear_aux_weight: 0.0
+    token_embedding_init: merge_compositional
+  trainer:
+    name: mgcf
+    lr: 1.0e-3
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mgcf_multigear_prediction_aware_matched_bias_pilot200:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prediction_aware_matched_prepared
+    tokenizer_name: multigear_prediction_aware_matched_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mgcf
+    dim: 210
+    layers: 3
+    kernel_size: 5
+    dilations: [1, 2, 4, 8]
+    memory_scales: [4, 16, 64]
+    memory_type: learned
+    memory_gate_init: 0.05
+    max_seq_len: 1024
+    hierarchy_gears: 6
+    input_gear_embedding: true
+    hierarchy_composition: true
+    byte_length_embedding: true
+    max_token_bytes: 64
+    composition_gate_init: 0.05
+    composition_aux_weight: 0.01
+    gear_aware_output: true
+    gear_output_mode: bias
+    gear_aux_weight: 0.0
+    token_embedding_init: merge_compositional
+  trainer:
+    name: mgcf
+    lr: 1.0e-3
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mgcf_sentencepiece_pilot200:
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mgcf
+    dim: 214
+    layers: 3
+    kernel_size: 5
+    dilations: [1, 2, 4, 8]
+    memory_scales: [4, 16, 64]
+    memory_type: learned
+    memory_gate_init: 0.05
+    max_seq_len: 1024
+    input_gear_embedding: false
+    hierarchy_composition: false
+    byte_length_embedding: false
+    composition_aux_weight: 0.0
+    gear_aware_output: false
+    gear_aux_weight: 0.0
+  trainer:
+    name: mgcf
+    lr: 1.0e-3
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mecm_sentencepiece_smoke:
+  model:
+    name: mecm
+    dim: 128
+    layers: 4
+    kernel_size: 7
+    max_seq_len: 1024
+    full_architecture: true
+    atlas_kernel_sizes: [3, 7, 15]
+    mesh_layers: 2
+    draft_horizons: [2, 4]
+    draft_aux_stride: 2
+    route_aux_weight: 0.01
+    draft_aux_weight: 0.02
+  trainer:
+    name: mecm
+    lr: 3.0e-4
+    warmup_steps: 5
+    total_steps: 20
+    grad_accum_steps: 1
+
+mecm_multigear_smoke:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prepared
+    tokenizer_name: multigear_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  model:
+    name: mecm
+    dim: 128
+    layers: 4
+    kernel_size: 7
+    max_seq_len: 1024
+    full_architecture: true
+    atlas_kernel_sizes: [3, 7, 15]
+    mesh_layers: 2
+    draft_horizons: [2, 4]
+    draft_aux_stride: 2
+    route_aux_weight: 0.01
+    draft_aux_weight: 0.02
+  trainer:
+    name: mecm
+    lr: 3.0e-4
+    warmup_steps: 5
+    total_steps: 20
+    grad_accum_steps: 1
+
+mecm_multigear_pilot200:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prepared
+    tokenizer_name: multigear_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mecm
+    dim: 128
+    layers: 4
+    kernel_size: 7
+    max_seq_len: 1024
+    full_architecture: true
+    atlas_kernel_sizes: [3, 7, 15]
+    mesh_layers: 2
+    draft_horizons: [2, 4]
+    draft_aux_stride: 2
+    route_aux_weight: 0.01
+    draft_aux_weight: 0.02
+  trainer:
+    name: mecm
+    lr: 3.0e-4
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mecm_multigear_no_draft_aux_pilot200:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prepared
+    tokenizer_name: multigear_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mecm
+    dim: 128
+    layers: 4
+    kernel_size: 7
+    max_seq_len: 1024
+    full_architecture: true
+    atlas_kernel_sizes: [3, 7, 15]
+    mesh_layers: 2
+    draft_horizons: [2, 4]
+    draft_aux_stride: 2
+    route_aux_weight: 0.01
+    draft_aux_weight: 0.0
+  trainer:
+    name: mecm
+    lr: 3.0e-4
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mecm_multigear_gear_aware_pilot200:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prepared
+    tokenizer_name: multigear_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mecm
+    dim: 128
+    layers: 4
+    kernel_size: 7
+    max_seq_len: 1024
+    full_architecture: true
+    atlas_kernel_sizes: [3, 7, 15]
+    mesh_layers: 2
+    draft_horizons: [2, 4]
+    draft_aux_stride: 2
+    route_aux_weight: 0.01
+    draft_aux_weight: 0.0
+    gear_aware_output: true
+    hierarchy_gears: 6
+    gear_aux_weight: 0.0
+  trainer:
+    name: mecm
+    lr: 3.0e-4
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mecm_multigear_gear_aware_aux_pilot200:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prepared
+    tokenizer_name: multigear_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mecm
+    dim: 128
+    layers: 4
+    kernel_size: 7
+    max_seq_len: 1024
+    full_architecture: true
+    atlas_kernel_sizes: [3, 7, 15]
+    mesh_layers: 2
+    draft_horizons: [2, 4]
+    draft_aux_stride: 2
+    route_aux_weight: 0.01
+    draft_aux_weight: 0.0
+    gear_aware_output: true
+    hierarchy_gears: 6
+    gear_aux_weight: 0.01
+  trainer:
+    name: mecm
+    lr: 3.0e-4
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mecm_multigear_gear_bias_pilot200:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prepared
+    tokenizer_name: multigear_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mecm
+    dim: 128
+    layers: 4
+    kernel_size: 7
+    max_seq_len: 1024
+    full_architecture: true
+    atlas_kernel_sizes: [3, 7, 15]
+    mesh_layers: 2
+    draft_horizons: [2, 4]
+    draft_aux_stride: 2
+    route_aux_weight: 0.01
+    draft_aux_weight: 0.0
+    gear_aware_output: true
+    hierarchy_gears: 6
+    gear_output_mode: bias
+    gear_aux_weight: 0.0
+  trainer:
+    name: mecm
+    lr: 3.0e-4
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mecm_multigear_gear_bias_aux_pilot200:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prepared
+    tokenizer_name: multigear_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mecm
+    dim: 128
+    layers: 4
+    kernel_size: 7
+    max_seq_len: 1024
+    full_architecture: true
+    atlas_kernel_sizes: [3, 7, 15]
+    mesh_layers: 2
+    draft_horizons: [2, 4]
+    draft_aux_stride: 2
+    route_aux_weight: 0.01
+    draft_aux_weight: 0.0
+    gear_aware_output: true
+    hierarchy_gears: 6
+    gear_output_mode: bias
+    gear_aux_weight: 0.01
+  trainer:
+    name: mecm
+    lr: 3.0e-4
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mcpm_sentencepiece_pilot200:
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mcpm
+    dim: 128
+    layers: 4
+    kernel_size: 7
+    max_seq_len: 1024
+    full_architecture: true
+    atlas_kernel_sizes: [3, 7, 15]
+    mesh_layers: 2
+    draft_horizons: [2, 4]
+    draft_aux_stride: 2
+    route_aux_weight: 0.01
+    draft_aux_weight: 0.02
+    program_aux_weight: 0.02
+    verifier_aux_weight: 0.02
+  trainer:
+    name: mcpm
+    lr: 3.0e-4
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mcpm_multigear_pilot200:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prepared
+    tokenizer_name: multigear_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mcpm
+    dim: 128
+    layers: 4
+    kernel_size: 7
+    max_seq_len: 1024
+    full_architecture: true
+    atlas_kernel_sizes: [3, 7, 15]
+    mesh_layers: 2
+    draft_horizons: [2, 4]
+    draft_aux_stride: 2
+    route_aux_weight: 0.01
+    draft_aux_weight: 0.02
+    program_aux_weight: 0.02
+    verifier_aux_weight: 0.02
+  trainer:
+    name: mcpm
+    lr: 3.0e-4
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mrwt_sentencepiece_pilot200:
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mrwt
+    dim: 160
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+    full_architecture: true
+    atlas_kernel_sizes: [5, 17, 65]
+    workbench_rounds: 2
+    workbench_kernel_size: 17
+    draft_horizons: [2, 4]
+    draft_aux_stride: 2
+    budget_aux_weight: 0.01
+    draft_aux_weight: 0.02
+  trainer:
+    name: mrwt
+    lr: 3.0e-4
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mrwt_multigear_pilot200:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prepared
+    tokenizer_name: multigear_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mrwt
+    dim: 160
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+    full_architecture: true
+    atlas_kernel_sizes: [5, 17, 65]
+    workbench_rounds: 2
+    workbench_kernel_size: 17
+    draft_horizons: [2, 4]
+    draft_aux_stride: 2
+    budget_aux_weight: 0.01
+    draft_aux_weight: 0.02
+  trainer:
+    name: mrwt
+    lr: 3.0e-4
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mcpm_multigear_no_draft_aux_pilot200:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prepared
+    tokenizer_name: multigear_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mcpm
+    dim: 128
+    layers: 4
+    kernel_size: 7
+    max_seq_len: 1024
+    full_architecture: true
+    atlas_kernel_sizes: [3, 7, 15]
+    mesh_layers: 2
+    draft_horizons: [2, 4]
+    draft_aux_stride: 2
+    route_aux_weight: 0.01
+    draft_aux_weight: 0.0
+    program_aux_weight: 0.02
+    verifier_aux_weight: 0.02
+  trainer:
+    name: mcpm
+    lr: 3.0e-4
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mcpm_multigear_minimal_pilot200:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prepared
+    tokenizer_name: multigear_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mcpm
+    dim: 128
+    layers: 4
+    kernel_size: 7
+    max_seq_len: 1024
+    full_architecture: false
+  trainer:
+    name: mcpm
+    lr: 3.0e-4
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mrwt_multigear_anchor_pilot200:
+  data:
+    name: edu_combined
+    root: outputs/multigear_prepared
+    tokenizer_name: multigear_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 2
+    seq_len: 64
+    steps: 200
+  model:
+    name: mrwt
+    dim: 160
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+    full_architecture: false
+    use_atlas: false
+    use_workbench: false
+  trainer:
+    name: mrwt
+    lr: 3.0e-4
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1

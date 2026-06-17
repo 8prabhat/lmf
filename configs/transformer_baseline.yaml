@@ -1,0 +1,60 @@
+# Modern transformer baseline (RMSNorm + RoPE + SwiGLU + SDPA), with dim/layers/
+# heads matched to configs/rhca_v4.yaml. NOTE: matching these hyperparameters
+# does NOT match total parameter count (RHCA's factorised codebook + memory mean
+# its param count differs substantially from a vanilla embedding+head transformer
+# at the "same" dim/layers/heads — check params_total before calling a comparison
+# "parameter-matched"). Trained on the same corpus, same wall-clock budget, for
+# an honest comparison against RHCA (review §7: quality at matched wall-clock,
+# not matched steps).
+
+default_block: smoke
+
+base:
+  seed: 0
+  device: auto
+  precision: bf16
+  data:
+    name: procedural
+    vocab_size: 512
+
+smoke:
+  model:
+    name: transformer
+    vocab_size: 512
+    dim: 128
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+  trainer:
+    name: transformer
+    lr: 3.0e-3
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+  run:
+    batch_size: 8
+    seq_len: 128
+    steps: 200
+
+# Scaled to sit near the RHCA v4 compute budget for the head-to-head.
+production_v4:
+  model:
+    name: transformer
+    vocab_size: 32768
+    dim: 1024
+    layers: 9
+    heads: 16
+    max_seq_len: 4096
+  data:
+    name: wikitext103
+    bpe_vocab: 32768
+  trainer:
+    name: transformer
+    lr: 3.0e-4
+    warmup_steps: 1000
+    total_steps: 20000
+    grad_accum_steps: 4
+  run:
+    batch_size: 8
+    seq_len: 512
+    steps: 20000

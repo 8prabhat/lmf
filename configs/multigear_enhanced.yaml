@@ -1,0 +1,47 @@
+# Full-stack MultiGear ablation preset.
+#
+# Replace data.text_file with the intended training corpus for real experiments.
+# The tokenizer is trained on the train split only.
+# For the evidence-backed configuration, use multigear_recommended.yaml. The
+# auxiliary objective and segmentation dropout here did not improve the
+# ten-paired-seed generative result.
+
+default_block: smoke
+
+base:
+  seed: 0
+  device: auto
+  precision: fp32
+  data:
+    name: multigear_text
+    text_file: src/lmf/experiments/spt_bench/sample_corpus_multilingual.txt
+    max_vocab: 512
+    tokenizer_kwargs:
+      max_token_bytes: 16
+
+smoke:
+  model:
+    name: transformer
+    dim: 64
+    layers: 2
+    heads: 2
+    max_seq_len: 256
+    token_embedding_init: merge_compositional
+    hierarchical_output: true
+    hierarchy_gears: 6
+    hierarchy_aux_weight: 0.10
+    hierarchy_aux_min_gear: 2
+    hierarchy_aux_target: bytes
+    hierarchy_aux_max_bytes: 16
+  trainer:
+    name: transformer
+    lr: 3.0e-3
+    warmup_steps: 10
+    total_steps: 50
+    segmentation_dropout_prob: 0.10
+    segmentation_dropout_min_gear: 2
+    segmentation_dropout_max_depth: 1
+  run:
+    batch_size: 4
+    seq_len: 64
+    steps: 50

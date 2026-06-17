@@ -1,0 +1,41 @@
+# Evidence-backed MultiGear generative preset.
+#
+# The 360-degree FLORES marked-span benchmark supports compositional
+# initialization plus hierarchical output. Auxiliary hierarchy loss and
+# segmentation dropout remain disabled because they did not improve the
+# paired ten-seed result.
+
+default_block: smoke
+
+base:
+  seed: 0
+  device: auto
+  precision: fp32
+  data:
+    name: multigear_text
+    text_file: src/lmf/experiments/spt_bench/sample_corpus_multilingual.txt
+    max_vocab: 512
+    tokenizer_kwargs:
+      max_token_bytes: 16
+
+smoke:
+  model:
+    name: transformer
+    dim: 64
+    layers: 2
+    heads: 2
+    max_seq_len: 256
+    token_embedding_init: merge_compositional
+    hierarchical_output: true
+    hierarchy_gears: 6
+    hierarchy_aux_weight: 0.0
+  trainer:
+    name: transformer
+    lr: 3.0e-3
+    warmup_steps: 10
+    total_steps: 50
+    segmentation_dropout_prob: 0.0
+  run:
+    batch_size: 4
+    seq_len: 64
+    steps: 50

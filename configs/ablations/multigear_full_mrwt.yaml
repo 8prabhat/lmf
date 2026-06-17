@@ -1,0 +1,40 @@
+# One-at-a-time ablation over the full MRWT research stack.
+
+ablation:
+  name: multigear_full_mrwt
+  base_config: configs/multigear_native_models.yaml
+  base_block: full_smoke_mrwt
+  mode: one_at_a_time
+  axes:
+    - path: "structural:atlas.scales.skip[0]"
+      values: [false, true]
+      label: skip_short_atlas
+    - path: "structural:atlas.scales.skip[2]"
+      values: [false, true]
+      label: skip_wide_atlas
+    - path: "structural:budget_controller.bypass"
+      values: [false, true]
+      label: bypass_budget_controller
+    - path: "structural:workbench_rounds.skip[0]"
+      values: [false, true]
+      label: skip_workbench_round_0
+    - path: "structural:workbench_rounds.skip[1]"
+      values: [false, true]
+      label: skip_workbench_round_1
+    - path: "loss_term:budget_controller"
+      values: [1.0, 0.0]
+      label: budget_aux_scale
+    - path: "loss_term:draft_tree"
+      values: [1.0, 0.0]
+      label: draft_aux_scale
+  seeds: [0]
+  run:
+    steps: 30
+    batch_size: 4
+    seq_len: 64
+  eval:
+    n_batches: 3
+    split: valid
+  metric: bits_per_token
+  goal: minimize
+

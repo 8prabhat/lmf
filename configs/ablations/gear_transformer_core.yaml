@@ -1,0 +1,50 @@
+# One-at-a-time ablations over the gear model itself. This isolates update mode,
+# layer placement, future loss, diversity, and alignment calibration.
+
+ablation:
+  name: gear_transformer_core
+  base_config: configs/gear_transformer.yaml
+  base_block: smoke
+  mode: one_at_a_time
+  axes:
+    - path: model.gear_update_mode
+      values: [chunked, dilated, scan]
+      label: update_mode
+    - path: model.gear_layer_strategy
+      values: [upper_alternate, upper_half, all]
+      label: gear_layers
+    - path: model.gear_dim
+      values: [64, 96, 128]
+      label: gear_dim
+    - path: model.gear_write_summary
+      values: [false, true]
+      label: write_summary
+    - path: model.cross_gear_coupling
+      values: [false, true]
+      label: cross_gear_coupling
+    - path: model.gear_coupling_init
+      values: [0.0, 0.05, 0.15]
+      label: coupling_init
+    - path: model.future_loss_weight
+      values: [0.0, 0.05]
+      label: future_loss
+    - path: model.diversity_loss_weight
+      values: [0.0, 0.001]
+      label: diversity_loss
+    - path: model.alignment_loss_weight
+      values: [0.0, 0.01]
+      label: alignment_loss
+    - path: model.consistency_loss_weight
+      values: [0.0, 0.01]
+      label: consistency_loss
+  seeds: [0]
+  run:
+    steps: 30
+    batch_size: 4
+    seq_len: 64
+  eval:
+    n_batches: 3
+    split: valid
+  metric: bits_per_token
+  goal: minimize
+  results_dir: results/ablations/gear_transformer_core

@@ -1,0 +1,237 @@
+# Multi-Rate Latent Gear Transformer configs.
+#
+# Smoke blocks use the procedural corpus so they run anywhere. The
+# sentencepiece_* blocks assume you first materialized a SentencePiece BPE
+# corpus, for example:
+#
+#   python scripts/train.py --config configs/gear_transformer.yaml --block smoke --steps 10
+#   lmf pretokenize-sentencepiece-bpe \
+#     --source data/my_corpus.txt \
+#     --output-root outputs/sentencepiece_bpe_prepared \
+#     --tokenizer-name sentencepiece_bpe_v1 \
+#     --vocab-size 32768
+
+default_block: smoke
+
+base:
+  seed: 0
+  device: auto
+  precision: bf16
+  data:
+    name: procedural
+    vocab_size: 512
+
+transformer_matched_smoke:
+  model:
+    name: transformer
+    vocab_size: 512
+    dim: 128
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+  trainer:
+    name: transformer
+    lr: 3.0e-3
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+  run:
+    batch_size: 8
+    seq_len: 128
+    steps: 200
+
+smoke:
+  model:
+    name: gear_transformer
+    vocab_size: 512
+    dim: 128
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+    num_gears: 4
+    gear_speeds: [1, 4, 16, 64]
+    gear_slots: [32, 32, 16, 16]
+    gear_receptive_fields: [8, 32, 96, 192]
+    gear_update_mode: dilated
+    gear_layer_strategy: upper_alternate
+    future_horizons: [4, 16]
+    future_loss_weight: 0.05
+    future_contrastive_weight: 0.0
+    diversity_loss_weight: 0.001
+    alignment_loss_weight: 0.01
+    consistency_loss_weight: 0.01
+  trainer:
+    name: gear_transformer
+    lr: 3.0e-3
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+  run:
+    batch_size: 8
+    seq_len: 128
+    steps: 200
+
+smoke_no_aux:
+  model:
+    name: gear_transformer
+    vocab_size: 512
+    dim: 128
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+    num_gears: 4
+    gear_speeds: [1, 4, 16, 64]
+    gear_slots: [32, 32, 16, 16]
+    gear_receptive_fields: [8, 32, 96, 192]
+    gear_update_mode: dilated
+    gear_layer_strategy: upper_alternate
+    future_horizons: [4, 16]
+    future_loss_weight: 0.0
+    future_contrastive_weight: 0.0
+    diversity_loss_weight: 0.0
+    alignment_loss_weight: 0.0
+    consistency_loss_weight: 0.0
+  trainer:
+    name: gear_transformer
+    lr: 3.0e-3
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+  run:
+    batch_size: 8
+    seq_len: 128
+    steps: 200
+
+gear_only_smoke:
+  model:
+    name: gear_only
+    vocab_size: 512
+    dim: 128
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+    use_attention: false
+    num_gears: 4
+    gear_speeds: [1, 4, 16, 64]
+    gear_slots: [32, 32, 16, 16]
+    gear_receptive_fields: [8, 32, 96, 192]
+    gear_update_mode: dilated
+    gear_layer_strategy: all
+    future_horizons: [4, 16]
+    future_loss_weight: 0.0
+    future_contrastive_weight: 0.0
+    diversity_loss_weight: 0.0
+    alignment_loss_weight: 0.0
+    consistency_loss_weight: 0.0
+  trainer:
+    name: gear_only
+    lr: 3.0e-3
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+  run:
+    batch_size: 8
+    seq_len: 128
+    steps: 200
+
+sentencepiece_smoke:
+  data:
+    name: edu_combined
+    root: outputs/sentencepiece_bpe_prepared
+    tokenizer_name: sentencepiece_bpe_v1
+    sample_weights: tokens
+    eval_max_tokens_per_domain: 200000
+    max_train_tokens_per_domain: 1000000
+  model:
+    name: gear_transformer
+    dim: 256
+    layers: 6
+    heads: 8
+    max_seq_len: 2048
+    num_gears: 4
+    gear_speeds: [1, 4, 16, 64]
+    gear_slots: [64, 64, 32, 32]
+    gear_receptive_fields: [8, 32, 128, 256]
+    gear_update_mode: dilated
+    gear_layer_strategy: upper_alternate
+    future_horizons: [8, 32]
+    future_loss_weight: 0.05
+    diversity_loss_weight: 0.001
+    alignment_loss_weight: 0.01
+    consistency_loss_weight: 0.01
+  trainer:
+    name: gear_transformer
+    lr: 3.0e-4
+    warmup_steps: 100
+    total_steps: 2000
+    grad_accum_steps: 4
+    prefetch: true
+  run:
+    batch_size: 4
+    seq_len: 512
+    steps: 2000
+
+sentencepiece_transformer_matched:
+  data:
+    name: edu_combined
+    root: outputs/sentencepiece_bpe_prepared
+    tokenizer_name: sentencepiece_bpe_v1
+    sample_weights: tokens
+    eval_max_tokens_per_domain: 200000
+    max_train_tokens_per_domain: 1000000
+  model:
+    name: transformer
+    dim: 256
+    layers: 6
+    heads: 8
+    max_seq_len: 2048
+  trainer:
+    name: transformer
+    lr: 3.0e-4
+    warmup_steps: 100
+    total_steps: 2000
+    grad_accum_steps: 4
+    prefetch: true
+  run:
+    batch_size: 4
+    seq_len: 512
+    steps: 2000
+
+sentencepiece_gear_only_smoke:
+  data:
+    name: edu_combined
+    root: outputs/sentencepiece_bpe_prepared
+    tokenizer_name: sentencepiece_bpe_v1
+    sample_weights: tokens
+    eval_max_tokens_per_domain: 200000
+    max_train_tokens_per_domain: 1000000
+  model:
+    name: gear_only
+    dim: 256
+    layers: 6
+    heads: 8
+    max_seq_len: 2048
+    use_attention: false
+    num_gears: 4
+    gear_speeds: [1, 4, 16, 64]
+    gear_slots: [64, 64, 32, 32]
+    gear_receptive_fields: [8, 32, 128, 256]
+    gear_update_mode: dilated
+    gear_layer_strategy: all
+    future_horizons: [8, 32]
+    future_loss_weight: 0.0
+    future_contrastive_weight: 0.0
+    diversity_loss_weight: 0.0
+    alignment_loss_weight: 0.0
+    consistency_loss_weight: 0.0
+  trainer:
+    name: gear_only
+    lr: 3.0e-4
+    warmup_steps: 100
+    total_steps: 2000
+    grad_accum_steps: 4
+    prefetch: true
+  run:
+    batch_size: 4
+    seq_len: 512
+    steps: 2000

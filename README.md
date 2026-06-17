@@ -1,0 +1,220 @@
+# Language Model Foundry (`lmf`)
+
+A clean-break research framework for sequence-model experiments. It is designed to
+host **many** language-model families side by side behind a small set of stable
+interfaces, so that adding a new architecture never requires touching the training,
+data, evaluation, or CLI layers.
+
+## Layout
+
+```
+src/lmf/
+  core/         framework-agnostic contracts: interfaces, registry, config, device/precision, seeding
+  data/         tokenizers, corpora, batching, background prefetch
+  training/     base Trainer (loop/optim/logging), callbacks, versioned checkpoints
+  evaluation/   metrics (BPT, repetition) and structural benchmarks (long-context, tokens/settle)
+  models/
+    native/        MultiGear-native baselines: MECM, MCPM, MGCF, MRWT
+    rhca/           rolling-frontier family (config, codebook, memory, dynamics, settle, model, trainer)
+    transformer/    parameter-matched baseline family + MGHT
+    gear_transformer/ Gear Transformer family: gear_transformer, mlgt, gear_only
+    opet/            OPET phase-enriched embedding family
+  experiments/  falsification kernels (RFK gates)
+  cli/          single `lmf` entrypoint: train | eval | generate | rfk
+configs/        one YAML per experiment; merged over a base + environment overlay
+scripts/        thin wrappers around the CLI for train / evaluate / generate / rfk
+tests/          unit + smoke tests
+docs/RESEARCH_NOTES.md  condensed research log: every architecture decision,
+                tokenizer experiment, and pilot result produced in this repo
+```
+
+## Design principles
+
+* **Single Responsibility / Interface Segregation** -- `core/interfaces.py` defines narrow
+  Protocols (`LanguageModel`, `Generative`, `Trainable`, `Corpus`, `Tokenizer`). A family
+  implements only what it needs.
+* **Open/Closed via registries** -- models, corpora, and trainers self-register through
+  decorators (`core/registry.py`). New families are added without editing dispatch code.
+* **Dependency Inversion** -- the `Trainer`, evaluation, and CLI depend on the interfaces,
+  never on a concrete model.
+* **DRY** -- precision/device policy, checkpoint IO, batching, and the optimizer/logging loop
+  live once in the framework and are reused by every family.
+
+## Quickstart
+
+```bash
+pip install -e ".[dev]"
+lmf rfk --config configs/rhca_v4.yaml --block smoke      # falsification gates
+lmf train --config configs/rhca_v4.yaml --block smoke    # tiny smoke training run
+lmf eval  --config configs/rhca_v4.yaml --block smoke
+pytest
+```
+
+## Models
+
+Every model below self-registers under `src/lmf/models/` and is selected via
+`model.name` in a config. See `docs/RESEARCH_NOTES.md` for the evidence and
+recommendations behind each one.
+
+| Registry name | Family | What it is | Config |
+| --- | --- | --- | --- |
+| `transformer` | baseline | RMSNorm + RoPE + SwiGLU + SDPA decoder-only Transformer, parameter-matched reference for every other family | `configs/transformer_baseline.yaml` |
+| `rhca` | RHCA | rolling-frontier model: bounded carried-state windows, factorized codebook, unshared deep macro steps, entropy-based block commits, SDPA exact-recall tail | `configs/rhca_v4.yaml` |
+| `opet` | OPET | `transformer` baseline with phase-enriched token embeddings (`OPETEmbedding`) and a coherence auxiliary loss | `configs/opet_baseline.yaml` |
+| `gear_transformer` (alias `mlgt`) | Gear Transformer | full Transformer trunk plus a phase-conditioned gear side-channel with write/update/cross-gear-coupling/read stages | `configs/gear_transformer.yaml` |
+| `gear_only` | Gear Transformer | the same gear mechanism with causal self-attention removed entirely | `configs/gear_transformer.yaml` |
+| `mght` | MultiGear-native | `transformer` plus a learned MultiGear input-gear embedding and hierarchical (`bias`/`factorized`) gear-aware output head | `configs/generative_mecm_iteration.yaml` |
+| `mecm` | MultiGear-native | non-Transformer causal long-convolution trunk with a zero-gated mesh residual | `configs/multigear_native_models.yaml` |
+| `mcpm` | MultiGear-native | non-Transformer surface model with a zero-gated deterministic execution-trace adapter | `configs/multigear_native_models.yaml` |
+| `mgcf` | MultiGear-native | non-Transformer, non-Mamba MultiGear Fractal Causal Field: routed dilated causal branches, learned causal long-filter memory, MultiGear child composition, gear-aware output | `configs/multigear_native_models.yaml` |
+| `mrwt` | MultiGear-native | Transformer anchor with zero-gated causal atlas/workbench residual adapters and an exact anchor fallback | `configs/multigear_native_models.yaml` |
+
+`rhca` is the framework's primary resident family. The MultiGear-native models
+(`mecm`, `mcpm`, `mgcf`, `mrwt`, `mght`) and the Gear Transformer family are
+research baselines exploring whether MultiGear hierarchy or a gear side-channel
+can beat a matched Transformer + SentencePiece BPE -- as of the latest pilots
+(`docs/RESEARCH_NOTES.md`), none of them have, though `mght` and `mgcf` are the
+closest.
+
+```bash
+lmf train    --config configs/multigear_native_models.yaml --block smoke_mecm --steps 10
+lmf train    --config configs/multigear_native_models.yaml --block smoke_mcpm --steps 10
+lmf train    --config configs/multigear_native_models.yaml --block smoke_mgcf --steps 10
+lmf train    --config configs/multigear_native_models.yaml --block smoke_mrwt --steps 10
+lmf eval     --config configs/multigear_native_models.yaml --block smoke_mrwt --n-batches 2
+lmf generate --config configs/multigear_native_models.yaml --block smoke_mecm --max-new-tokens 32
+```
+
+Full research variants add ablation-visible modules around those safe paths:
+
+```bash
+lmf train --config configs/multigear_native_models.yaml --block full_smoke_mecm --steps 10
+lmf train --config configs/multigear_native_models.yaml --block full_smoke_mcpm --steps 10
+lmf train --config configs/multigear_native_models.yaml --block full_smoke_mrwt --steps 10
+```
+
+The matching one-at-a-time ablation specs are:
+
+```bash
+lmf ablate --config configs/ablations/multigear_full_mecm.yaml --dry-run
+lmf ablate --config configs/ablations/multigear_full_mcpm.yaml --dry-run
+lmf ablate --config configs/ablations/multigear_full_mrwt.yaml --dry-run
+```
+
+Remove `--dry-run` to execute the ablation. The full modules are deliberately
+named for structural ablation, for example `span_atlas.scales.skip[0]`,
+`active_cover.bypass`, `execution_workbench.rounds.skip[0]`,
+`contract_verifier.bypass`, `budget_controller.bypass`, and
+`workbench_rounds.skip[0]`.
+
+For the already-downloaded pre-tokenized corpus:
+
+```bash
+lmf train --config configs/multigear_native_models.yaml --block edu_mecm
+lmf train --config configs/multigear_native_models.yaml --block edu_mcpm
+lmf train --config configs/multigear_native_models.yaml --block edu_mrwt
+lmf train --config configs/multigear_native_models.yaml --block edu_full_mecm
+lmf train --config configs/multigear_native_models.yaml --block edu_full_mcpm
+lmf train --config configs/multigear_native_models.yaml --block edu_full_mrwt
+```
+
+`edu_combined` samples the large `train_bpe32768_v2.bin` shards with numpy
+memmap and loads bounded valid/test `.pt` tensors. If the sibling Quanthelion
+package is available, the shared tokenizer is used for prompt encoding and text
+decoding; otherwise generation still works with token-id fallback.
+
+## MultiGear tokenizer
+
+The evidence-backed MultiGear generative integration uses merge-compositional
+initialization and hierarchical gear/token output:
+
+```bash
+lmf train --config configs/multigear_recommended.yaml --block smoke
+```
+
+For real runs, train the slow MultiGear tokenizer once and materialize token ids
+before model training:
+
+```bash
+lmf pretokenize-multigear \
+  --source /path/to/raw_text_file_or_directory \
+  --output-root /path/to/multigear_prepared \
+  --tokenizer-name multigear32768_v1 \
+  --vocab-size 32768
+
+lmf train \
+  --config configs/multigear_pretokenized.yaml \
+  --block transformer_smoke \
+  --set data.root=/path/to/multigear_prepared \
+  --set data.tokenizer_name=multigear32768_v1
+```
+
+The preprocessing command writes the same disk format used by `edu_combined`:
+`shared_tokenizer_<name>.pt`, memory-mapped `train_<name>.bin`, and
+`valid_<name>.pt` / `test_<name>.pt`. Training then samples token windows from
+disk without retraining or re-encoding the tokenizer.
+
+To derive a diverse MultiGear subset from the existing `edu_combined` BPE shards:
+
+```bash
+lmf pretokenize-edu-multigear \
+  --source-root "/path/to/edu_combined" \
+  --output-root outputs/multigear_prepared \
+  --source-tokenizer-name bpe32768_v2 \
+  --tokenizer-name multigear_edu_subset_v1 \
+  --vocab-size 4096 \
+  --fraction 0.10 \
+  --max-bpe-tokens-per-domain 200000
+
+lmf ablate --config configs/ablations/mecm_multigear_pretok_smoke.yaml --force
+```
+
+Omit `--max-bpe-tokens-per-domain` only for a literal 10% run. On the current
+`edu_combined` corpus that is about 4.35B source BPE tokens before MultiGear
+re-tokenization, so the capped command is the practical smoke path.
+
+For an apple-to-apple generative baseline, materialize a SentencePiece BPE view
+of the same sampled text and evaluate byte-normalized loss:
+
+```bash
+lmf pretokenize-edu-sentencepiece-bpe \
+  --source-root "/path/to/edu_combined" \
+  --output-root outputs/sentencepiece_bpe_prepared \
+  --source-tokenizer-name bpe32768_v2 \
+  --tokenizer-name sentencepiece_bpe_edu_subset_v1 \
+  --vocab-size 4096 \
+  --fraction 0.10 \
+  --max-bpe-tokens-per-domain 200000
+
+lmf train --config configs/generative_mecm_iteration.yaml \
+  --block transformer_sentencepiece_matched_smoke \
+  --steps 200 \
+  --checkpoint outputs/checkpoints/transformer_sentencepiece_matched_pilot200.pt \
+  --set trainer.total_steps=200 \
+  --set trainer.warmup_steps=20 \
+  --set run.steps=200
+
+lmf eval --config configs/generative_mecm_iteration.yaml \
+  --block transformer_sentencepiece_matched_smoke \
+  --checkpoint outputs/checkpoints/transformer_sentencepiece_matched_pilot200.pt \
+  --n-batches 5 \
+  --set trainer.total_steps=200 \
+  --set trainer.warmup_steps=20 \
+  --set run.steps=200
+```
+
+`lmf eval` reports `bits_per_byte` whenever the corpus tokenizer has a lossless
+decoder. Use that metric, not raw bits/token, when comparing tokenizers.
+
+All pilot results, tokenizer benchmarks, and architecture decisions referenced
+above (MECM, MCPM, MGCF, MRWT, MGHT, the Gear Transformer family, and the
+unimplemented MultiGear Predictive Junction Algebra proposal) are written up in
+[`docs/RESEARCH_NOTES.md`](docs/RESEARCH_NOTES.md).
+
+## RHCA training profile
+
+RHCA training intentionally keeps only the final `max_train_windows` carried
+frontier windows differentiable per optimizer step. Earlier context is folded
+into prefill, so retained activation memory no longer grows with sequence length.
+The default is two windows. Increase it only when partial-commit carry quality is
+worth the additional training compute and memory.

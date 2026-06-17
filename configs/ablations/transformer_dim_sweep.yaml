@@ -1,0 +1,23 @@
+# One-at-a-time sweep over model.dim / model.layers against the transformer
+# baseline's `smoke` block. Proves the ablation runner works without importing
+# any model module — only registry names from configs/transformer_baseline.yaml.
+ablation:
+  name: transformer_dim_sweep
+  base_config: configs/transformer_baseline.yaml
+  base_block: smoke
+  mode: one_at_a_time
+  axes:
+    - path: model.dim
+      values: [64, 128, 256]
+    - path: model.layers
+      values: [2, 4, 6]
+  seeds: [0, 1]
+  run:
+    steps: 30
+    batch_size: 4
+    seq_len: 64
+  eval:
+    n_batches: 3
+    split: valid
+  metric: bits_per_token
+  goal: minimize

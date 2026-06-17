@@ -1,0 +1,45 @@
+# Longer MCPM + MultiGear pilot ablation over the pretokenized edu subset.
+# Same caution as MECM: this is a single-seed 200-step pilot, not a final
+# benchmark. It is meant to expose obvious component bottlenecks.
+
+ablation:
+  name: mcpm_multigear_pretok_pilot200
+  base_config: configs/generative_mecm_iteration.yaml
+  base_block: mcpm_multigear_pilot200
+  mode: one_at_a_time
+  axes:
+    - path: "structural:span_atlas.scales.skip[0]"
+      values: [false, true]
+      label: skip_short_span_atlas
+    - path: "structural:active_cover.bypass"
+      values: [false, true]
+      label: bypass_active_cover
+    - path: "structural:program_controller.bypass"
+      values: [false, true]
+      label: bypass_program_controller
+    - path: "structural:execution_workbench.rounds.skip[0]"
+      values: [false, true]
+      label: skip_execution_round_0
+    - path: "structural:contract_verifier.bypass"
+      values: [false, true]
+      label: bypass_contract_verifier
+    - path: "loss_term:program_controller"
+      values: [1.0, 0.0]
+      label: program_aux_scale
+    - path: "loss_term:contract_verifier"
+      values: [1.0, 0.0]
+      label: verifier_aux_scale
+    - path: "loss_term:draft_tree"
+      values: [1.0, 0.0]
+      label: draft_aux_scale
+  seeds: [0]
+  run:
+    steps: 200
+    batch_size: 2
+    seq_len: 64
+  eval:
+    n_batches: 5
+    split: valid
+  metric: bits_per_token
+  goal: minimize
+  results_dir: results/ablations/mcpm_multigear_pretok_pilot200

@@ -1,0 +1,30 @@
+# Structural + loss-term ablation over the OPET baseline's `smoke` block.
+#
+# - `structural:blocks.skip[0]` is a *generic* point discovered by
+#   `lmf.ablation.points.discover_points` (every `nn.ModuleList` with length
+#   > 1 contributes one `skip[i]` per element) — works for any architecture
+#   with a transformer-block stack, not just OPET.
+# - `loss_term:phase_coherence` scales the OPET phase-coherence loss term
+#   (see `OPETTransformerLM.training_step`'s `loss_term_scales` kwarg).
+ablation:
+  name: opet_smoke
+  base_config: configs/opet_baseline.yaml
+  base_block: smoke
+  mode: grid
+  axes:
+    - path: "structural:blocks.skip[0]"
+      values: [false, true]
+      label: skip_block_0
+    - path: "loss_term:phase_coherence"
+      values: [1.0, 0.0]
+      label: coherence_scale
+  seeds: [0]
+  run:
+    steps: 30
+    batch_size: 4
+    seq_len: 64
+  eval:
+    n_batches: 3
+    split: valid
+  metric: bits_per_token
+  goal: minimize

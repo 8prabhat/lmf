@@ -1,0 +1,85 @@
+# Baseline-vs-gear comparison. The baseline cell is the modern Transformer
+# from configs/gear_transformer.yaml::transformer_matched_smoke. Named variants
+# switch the model family to gear_transformer with matched dim/layers/heads.
+
+ablation:
+  name: gear_transformer_vs_baselines
+  base_config: configs/gear_transformer.yaml
+  base_block: transformer_matched_smoke
+  mode: named_variants
+  variants:
+    - name: gear_dilated_full
+      overrides:
+        model:
+          name: gear_transformer
+          vocab_size: 512
+          dim: 128
+          layers: 4
+          heads: 4
+          max_seq_len: 1024
+          num_gears: 4
+          gear_speeds: [1, 4, 16, 64]
+          gear_slots: [32, 32, 16, 16]
+          gear_receptive_fields: [8, 32, 96, 192]
+          gear_update_mode: dilated
+          gear_layer_strategy: upper_alternate
+          future_horizons: [4, 16]
+          future_loss_weight: 0.05
+          future_contrastive_weight: 0.0
+          diversity_loss_weight: 0.001
+          alignment_loss_weight: 0.01
+          consistency_loss_weight: 0.01
+        trainer:
+          name: gear_transformer
+    - name: gear_no_aux
+      overrides:
+        model:
+          name: gear_transformer
+          vocab_size: 512
+          dim: 128
+          layers: 4
+          heads: 4
+          max_seq_len: 1024
+          num_gears: 4
+          gear_speeds: [1, 4, 16, 64]
+          gear_slots: [32, 32, 16, 16]
+          gear_receptive_fields: [8, 32, 96, 192]
+          gear_update_mode: dilated
+          gear_layer_strategy: upper_alternate
+          future_horizons: [4, 16]
+          future_loss_weight: 0.0
+          future_contrastive_weight: 0.0
+          diversity_loss_weight: 0.0
+          alignment_loss_weight: 0.0
+          consistency_loss_weight: 0.0
+        trainer:
+          name: gear_transformer
+    - name: transformer_future_only
+      overrides:
+        model:
+          name: gear_transformer
+          vocab_size: 512
+          dim: 128
+          layers: 4
+          heads: 4
+          max_seq_len: 1024
+          num_gears: 0
+          gear_layer_strategy: none
+          future_horizons: [4, 16]
+          future_loss_weight: 0.05
+          diversity_loss_weight: 0.0
+          alignment_loss_weight: 0.0
+          consistency_loss_weight: 0.01
+        trainer:
+          name: gear_transformer
+  seeds: [0]
+  run:
+    steps: 30
+    batch_size: 4
+    seq_len: 64
+  eval:
+    n_batches: 3
+    split: valid
+  metric: bits_per_token
+  goal: minimize
+  results_dir: results/ablations/gear_transformer_vs_baselines

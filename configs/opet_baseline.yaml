@@ -1,0 +1,39 @@
+# OPET: phase-enriched embedding on top of the transformer baseline.
+# Same shape as configs/transformer_baseline.yaml so the two are directly
+# comparable at matched dim/layers/heads.
+
+default_block: smoke
+
+base:
+  seed: 0
+  device: auto
+  precision: bf16
+  data:
+    name: procedural
+    vocab_size: 512
+
+smoke:
+  model:
+    name: opet
+    vocab_size: 512
+    dim: 128
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+    context_window: 4
+    n_freq_bands: 8
+    phase_init_scale: 0.1
+    lambda_coherence: 0.10
+    lambda_sharpness: 0.05
+    lambda_orthogonality: 0.01
+    lambda_amplitude: 0.02
+  trainer:
+    name: opet
+    lr: 3.0e-3
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+  run:
+    batch_size: 8
+    seq_len: 128
+    steps: 200

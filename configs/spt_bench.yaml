@@ -1,0 +1,89 @@
+# SPT (Surprisal-Driven Phase Tokenizer) vs BPE benchmark.
+#
+# Compares the standalone, architecture-agnostic oscillation-based tokenizer
+# against byte-level BPE at matched vocabulary size: compression ratio,
+# tokenizer training wall-clock, and downstream bits-per-byte of a small
+# transformer trained from scratch on each tokenizer's token stream.
+#
+# Run with: lmf spt-bench --config configs/spt_bench.yaml --block smoke
+
+default_block: smoke
+
+base:
+  seed: 0
+  device: auto
+  precision: fp32
+  vocab_size: 100000
+
+smoke:
+  vocab_size: 512
+  data:
+    text_file: "/Users/prabhat/Library/CloudStorage/GoogleDrive-888prabhat@gmail.com/My Drive/Work/quanthelion_foundational_model/data/84.txt"
+  model:
+    name: transformer
+    dim: 64
+    layers: 2
+    heads: 2
+    max_seq_len: 256
+  trainer:
+    name: transformer
+    lr: 3.0e-3
+    warmup_steps: 30
+    total_steps: 300
+  run:
+    batch_size: 8
+    seq_len: 64
+    steps: 300
+    eval_batches: 10
+
+# Small multilingual corpus (10 languages/scripts: Latin, Cyrillic, Arabic,
+# Devanagari, CJK, Hangul, emoji) -- exercises SurprisalPhaseTokenizer's
+# unicode_safe / grapheme_vocab_fraction handling. Corpus is tiny (~6KB), so
+# downstream bpt here is illustrative only, not a reliable signal.
+# Production-scale corpus: ~22M chars of PG-19 (Project Gutenberg books) text,
+# reconstructed losslessly from the production BPE32768 token stream used in
+# quanthelion_foundational_model/data/edu_combined/pg19 (the raw text is not
+# stored there -- only pre-tokenized binaries -- so this file decodes a 6M
+# token prefix of train_bpe32768_v2.bin back to text via the shared production
+# tokenizer). Matched vocab=8192 for both BPE and SPT.
+prod:
+  vocab_size: 8192
+  data:
+    text_file: "/Users/prabhat/Library/CloudStorage/GoogleDrive-888prabhat@gmail.com/My Drive/Work/quanthelion_foundational_model/data/pg19_decoded_22mb.txt"
+  model:
+    name: transformer
+    dim: 128
+    layers: 4
+    heads: 4
+    max_seq_len: 512
+  trainer:
+    name: transformer
+    lr: 3.0e-3
+    warmup_steps: 50
+    total_steps: 600
+  run:
+    batch_size: 16
+    seq_len: 256
+    steps: 600
+    eval_batches: 20
+
+multilingual:
+  vocab_size: 1024
+  data:
+    text_file: "src/lmf/experiments/spt_bench/sample_corpus_multilingual.txt"
+  model:
+    name: transformer
+    dim: 64
+    layers: 2
+    heads: 2
+    max_seq_len: 256
+  trainer:
+    name: transformer
+    lr: 3.0e-3
+    warmup_steps: 30
+    total_steps: 300
+  run:
+    batch_size: 8
+    seq_len: 64
+    steps: 300
+    eval_batches: 10

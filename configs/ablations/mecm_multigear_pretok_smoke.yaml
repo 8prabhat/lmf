@@ -1,0 +1,40 @@
+# Short MECM ablation over a pretokenized MultiGear edu subset.
+#
+# Override `data.root` / `data.tokenizer_name` when running on a freshly
+# materialized subset.
+
+ablation:
+  name: mecm_multigear_pretok_smoke
+  base_config: configs/multigear_pretokenized.yaml
+  base_block: mecm_full_smoke
+  mode: one_at_a_time
+  axes:
+    - path: "structural:span_atlas.scales.skip[0]"
+      values: [false, true]
+      label: skip_short_span_atlas
+    - path: "structural:span_atlas.scales.skip[2]"
+      values: [false, true]
+      label: skip_wide_span_atlas
+    - path: "structural:active_cover.bypass"
+      values: [false, true]
+      label: bypass_active_cover
+    - path: "structural:reasoning_mesh.layers.skip[0]"
+      values: [false, true]
+      label: skip_reasoning_mesh_0
+    - path: "loss_term:route_balance"
+      values: [1.0, 0.0]
+      label: route_aux_scale
+    - path: "loss_term:draft_tree"
+      values: [1.0, 0.0]
+      label: draft_aux_scale
+  seeds: [0]
+  run:
+    steps: 8
+    batch_size: 2
+    seq_len: 64
+  eval:
+    n_batches: 1
+    split: valid
+  metric: bits_per_token
+  goal: minimize
+  results_dir: results/ablations/mecm_multigear_pretok_smoke

@@ -1,0 +1,112 @@
+# MultiGear tokenizer trained once, token ids materialized once.
+#
+# First create the dataset:
+#   lmf pretokenize-multigear \
+#     --source /path/to/raw_text_or_dir \
+#     --output-root /path/to/multigear_prepared \
+#     --tokenizer-name multigear_edu_subset_v1 \
+#     --vocab-size 32768
+#
+# Then train using this config. The corpus loader memory-maps train_*.bin and
+# loads the saved tokenizer only for hierarchy metadata / prompt decode.
+
+default_block: transformer_smoke
+
+base:
+  seed: 0
+  device: auto
+  precision: bf16
+  data:
+    name: edu_combined
+    root: "outputs/multigear_prepared"
+    tokenizer_name: multigear_edu_subset_v1
+    sample_weights: tokens
+    load_tokenizer: true
+  run:
+    batch_size: 8
+    seq_len: 512
+    steps: 1000
+
+transformer_smoke:
+  model:
+    name: transformer
+    dim: 256
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+    token_embedding_init: merge_compositional
+    hierarchical_output: true
+    hierarchy_gears: 6
+    hierarchy_aux_weight: 0.0
+  trainer:
+    name: transformer
+    lr: 3.0e-4
+    warmup_steps: 100
+    total_steps: 1000
+    grad_accum_steps: 1
+    segmentation_dropout_prob: 0.0
+
+mecm_smoke:
+  model:
+    name: mecm
+    dim: 256
+    layers: 4
+    kernel_size: 9
+    max_seq_len: 1024
+  trainer:
+    name: mecm
+    lr: 3.0e-4
+    warmup_steps: 100
+    total_steps: 1000
+    grad_accum_steps: 1
+
+mecm_full_smoke:
+  model:
+    name: mecm
+    dim: 128
+    layers: 4
+    kernel_size: 7
+    max_seq_len: 1024
+    full_architecture: true
+    atlas_kernel_sizes: [3, 7, 15]
+    mesh_layers: 2
+    draft_horizons: [2, 4]
+    draft_aux_stride: 2
+    route_aux_weight: 0.01
+    draft_aux_weight: 0.02
+  trainer:
+    name: mecm
+    lr: 3.0e-4
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+
+mcpm_smoke:
+  model:
+    name: mcpm
+    dim: 256
+    layers: 4
+    kernel_size: 9
+    max_seq_len: 1024
+  trainer:
+    name: mcpm
+    lr: 3.0e-4
+    warmup_steps: 100
+    total_steps: 1000
+    grad_accum_steps: 1
+
+mrwt_smoke:
+  model:
+    name: mrwt
+    dim: 256
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+    atlas_kernel_size: 9
+    workbench_kernel_size: 17
+  trainer:
+    name: mrwt
+    lr: 3.0e-4
+    warmup_steps: 100
+    total_steps: 1000
+    grad_accum_steps: 1

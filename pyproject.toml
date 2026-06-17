@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lmf"
+version = "0.1.0"
+description = "Language Model Foundry — a SOLID/DRY research framework for sequence models (RHCA rolling-frontier + baselines)."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.2",
+    "pyyaml>=6.0",
+    "numpy>=1.24",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+fast = ["tokenizers>=0.15"]
+data = ["datasets>=2.18"]
+ablate = ["matplotlib>=3.8"]
+multilingual = ["regex>=2024.0", "sentencepiece>=0.2", "tiktoken>=0.9", "tokenizers>=0.15"]
+
+[project.scripts]
+lmf = "lmf.cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

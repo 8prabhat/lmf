@@ -1,0 +1,281 @@
+# MultiGear-native architecture baselines:
+#   - MECM: non-Transformer causal mesh baseline
+#   - MCPM: non-Transformer surface path plus zero-gated execution trace adapter
+#   - MGCF: non-Transformer/non-Mamba fractal causal field baseline
+#   - MRWT: Transformer anchor plus zero-gated atlas/workbench residual adapters
+#
+# Smoke blocks use procedural data and are intended for CI/tests.
+# Edu blocks use the already-downloaded pre-tokenized edu_combined corpus.
+
+default_block: smoke_mecm
+
+base:
+  seed: 0
+  device: auto
+  precision: bf16
+  data:
+    name: procedural
+    vocab_size: 512
+  trainer:
+    lr: 3.0e-3
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+  run:
+    batch_size: 8
+    seq_len: 128
+    steps: 200
+
+smoke_mecm:
+  model:
+    name: mecm
+    vocab_size: 512
+    dim: 128
+    layers: 4
+    kernel_size: 7
+    max_seq_len: 1024
+  trainer:
+    name: mecm
+
+smoke_mcpm:
+  model:
+    name: mcpm
+    vocab_size: 512
+    dim: 128
+    layers: 4
+    kernel_size: 7
+    max_seq_len: 1024
+  trainer:
+    name: mcpm
+
+smoke_mgcf:
+  model:
+    name: mgcf
+    vocab_size: 512
+    dim: 128
+    layers: 4
+    kernel_size: 5
+    dilations: [1, 2, 4, 8]
+    memory_scales: [4, 16, 64]
+    max_seq_len: 1024
+    input_gear_embedding: false
+    hierarchy_composition: false
+    byte_length_embedding: false
+    gear_aware_output: false
+  trainer:
+    name: mgcf
+
+smoke_mrwt:
+  model:
+    name: mrwt
+    vocab_size: 512
+    dim: 128
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+    atlas_kernel_size: 9
+    workbench_kernel_size: 17
+  trainer:
+    name: mrwt
+
+full_smoke_mecm:
+  model:
+    name: mecm
+    vocab_size: 512
+    dim: 128
+    layers: 4
+    kernel_size: 7
+    max_seq_len: 1024
+    full_architecture: true
+    atlas_kernel_sizes: [3, 7, 15]
+    mesh_layers: 2
+    draft_horizons: [2, 4]
+    draft_aux_stride: 2
+    route_aux_weight: 0.01
+    draft_aux_weight: 0.02
+  trainer:
+    name: mecm
+
+full_smoke_mcpm:
+  model:
+    name: mcpm
+    vocab_size: 512
+    dim: 128
+    layers: 4
+    kernel_size: 7
+    max_seq_len: 1024
+    full_architecture: true
+    atlas_kernel_sizes: [3, 7, 15]
+    mesh_layers: 2
+    draft_horizons: [2, 4]
+    draft_aux_stride: 2
+    route_aux_weight: 0.01
+    draft_aux_weight: 0.02
+    program_aux_weight: 0.02
+    verifier_aux_weight: 0.02
+  trainer:
+    name: mcpm
+
+full_smoke_mrwt:
+  model:
+    name: mrwt
+    vocab_size: 512
+    dim: 128
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+    full_architecture: true
+    atlas_kernel_sizes: [5, 17, 65]
+    workbench_rounds: 2
+    workbench_kernel_size: 17
+    draft_horizons: [2, 4]
+    draft_aux_stride: 2
+    budget_aux_weight: 0.01
+    draft_aux_weight: 0.02
+  trainer:
+    name: mrwt
+
+edu_base: &edu_base
+  seed: 0
+  device: auto
+  precision: bf16
+  data:
+    name: edu_combined
+    root: "/Users/prabhat/Library/CloudStorage/GoogleDrive-888prabhat@gmail.com/My Drive/Work/quanthelion_foundational_model/data/edu_combined"
+    tokenizer_name: bpe32768_v2
+    sample_weights: tokens
+    # Keep eval memory bounded for first-pass experiments. Remove or increase
+    # after smoke runs are stable.
+    eval_max_tokens_per_domain: 200000
+    load_tokenizer: true
+  trainer:
+    lr: 3.0e-4
+    warmup_steps: 500
+    total_steps: 20000
+    grad_accum_steps: 4
+  run:
+    batch_size: 8
+    seq_len: 512
+    steps: 20000
+
+edu_mecm:
+  <<: *edu_base
+  model:
+    name: mecm
+    vocab_size: 32781
+    dim: 512
+    layers: 8
+    kernel_size: 15
+    max_seq_len: 4096
+  trainer:
+    name: mecm
+    lr: 3.0e-4
+    warmup_steps: 500
+    total_steps: 20000
+    grad_accum_steps: 4
+
+edu_mcpm:
+  <<: *edu_base
+  model:
+    name: mcpm
+    vocab_size: 32781
+    dim: 512
+    layers: 8
+    kernel_size: 15
+    max_seq_len: 4096
+  trainer:
+    name: mcpm
+    lr: 3.0e-4
+    warmup_steps: 500
+    total_steps: 20000
+    grad_accum_steps: 4
+
+edu_mrwt:
+  <<: *edu_base
+  model:
+    name: mrwt
+    vocab_size: 32781
+    dim: 512
+    layers: 8
+    heads: 8
+    max_seq_len: 4096
+    atlas_kernel_size: 17
+    workbench_kernel_size: 33
+  trainer:
+    name: mrwt
+    lr: 3.0e-4
+    warmup_steps: 500
+    total_steps: 20000
+    grad_accum_steps: 4
+
+edu_full_mecm:
+  <<: *edu_base
+  model:
+    name: mecm
+    vocab_size: 32781
+    dim: 512
+    layers: 8
+    kernel_size: 15
+    max_seq_len: 4096
+    full_architecture: true
+    atlas_kernel_sizes: [5, 17, 65]
+    mesh_layers: 3
+    draft_horizons: [2, 4, 8]
+    draft_aux_stride: 4
+    route_aux_weight: 0.005
+    draft_aux_weight: 0.01
+  trainer:
+    name: mecm
+    lr: 3.0e-4
+    warmup_steps: 500
+    total_steps: 20000
+    grad_accum_steps: 4
+
+edu_full_mcpm:
+  <<: *edu_base
+  model:
+    name: mcpm
+    vocab_size: 32781
+    dim: 512
+    layers: 8
+    kernel_size: 15
+    max_seq_len: 4096
+    full_architecture: true
+    atlas_kernel_sizes: [5, 17, 65]
+    mesh_layers: 3
+    draft_horizons: [2, 4, 8]
+    draft_aux_stride: 4
+    route_aux_weight: 0.005
+    draft_aux_weight: 0.01
+    program_aux_weight: 0.01
+    verifier_aux_weight: 0.01
+  trainer:
+    name: mcpm
+    lr: 3.0e-4
+    warmup_steps: 500
+    total_steps: 20000
+    grad_accum_steps: 4
+
+edu_full_mrwt:
+  <<: *edu_base
+  model:
+    name: mrwt
+    vocab_size: 32781
+    dim: 512
+    layers: 8
+    heads: 8
+    max_seq_len: 4096
+    full_architecture: true
+    atlas_kernel_sizes: [5, 17, 65]
+    workbench_rounds: 3
+    workbench_kernel_size: 33
+    draft_horizons: [2, 4, 8]
+    draft_aux_stride: 4
+    budget_aux_weight: 0.005
+    draft_aux_weight: 0.01
+  trainer:
+    name: mrwt
+    lr: 3.0e-4
+    warmup_steps: 500
+    total_steps: 20000
+    grad_accum_steps: 4
