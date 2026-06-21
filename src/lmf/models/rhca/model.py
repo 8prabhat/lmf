@@ -186,27 +186,31 @@ class RollingFrontierRHCA(nn.Module):
         stride = self.config.max_commit
         segment = segment or h
         n = tokens.shape[1]
-        if n < segment + h:
-            raise ValueError(f"sequence length {n} too short for segment {segment} + frontier {h}")
+        if n < segment + stride:
+            raise ValueError(f"sequence length {n} too short for segment {segment} + max_commit {stride}")
         max_train_windows = max(1, int(max_train_windows))
-        segment = max(segment, n - h - (max_train_windows - 1) * stride)
+        segment = max(segment, n - max_train_windows * stride)
         seg_mask = None if attention_mask is None else attention_mask[:, :segment]
         state = self.prefill(tokens[:, :segment], seg_mask)
         acc: dict[str, list[torch.Tensor]] = {}
         pos = segment
-        while pos + h <= n:
+        while pos + stride <= n:
             settled, _ = self.settle(state, active_only=True)
-            targets = tokens[:, pos:pos + h]
-            wmask = None if loss_mask is None else loss_mask[:, pos:pos + h]
-            if attention_mask is not None:
-                amask = attention_mask[:, pos:pos + h]
-                wmask = amask if wmask is None else (wmask & amask)
+            # Score only the positions advance() actually commits this cycle
+            # (the first `max_commit` chain-conditioned frontier slots) — the
+            # rest of the settled frontier is carried forward and re-settled
+            # before it is ever committed, so supervising it here under an
+            # oracle-shifted condition it will never see again at commit time
+            # only teaches a context pattern that's never replayed (review
+            # finding: train/inference objective mismatch).
+            targets = tokens[:, pos:pos + stride]
+            cmask = None if attention_mask is None else attention_mask[:, pos:pos + stride]
+            wmask = None if loss_mask is None else loss_mask[:, pos:pos + stride]
+            wmask = cmask if wmask is None else (wmask if cmask is None else (wmask & cmask))
             losses = self._window_losses(settled, targets, wmask)
             for k, v in losses.items():
                 acc.setdefault(k, []).append(v)
-            commit = tokens[:, pos:pos + stride]          # commit a max_commit-wide block
-            cmask = None if attention_mask is None else attention_mask[:, pos:pos + stride]
-            state = self._advance_state(state, settled, commit, cmask)
+            state = self._advance_state(state, settled, targets, cmask)
             state = state.detach()            # TBPTT boundary (review Q1)
             pos += stride
         reduced = {k: torch.stack(v).mean() for k, v in acc.items()}
@@ -270,11 +274,16 @@ class RollingFrontierRHCA(nn.Module):
         max_c = self.config.max_commit
         committed_steps, logit_steps = [], []
         prev_embed = None
+        # Reconstruct the low-rank decode weight once for this whole commit
+        # block instead of once per iteration — logits() rebuilds it from
+        # scratch on every call, so without this the V x D matmul was repeated
+        # up to max_commit times per settle cycle for identical output.
+        decode_weight = self.codebook.decode_weight()
         for i in range(max_c):
             hidden = frontier[:, 0, i]
             if prev_embed is not None:
                 hidden = rms(hidden + self.commit_cond_proj(prev_embed))
-            logits_i = self.codebook.logits(hidden)
+            logits_i = self.codebook.logits_from_weight(hidden, decode_weight)
             if cfg.repetition_penalty != 1.0:
                 # Penalise tokens already in the verbatim tail or committed this block.
                 repeated = torch.zeros_like(logits_i, dtype=torch.bool)

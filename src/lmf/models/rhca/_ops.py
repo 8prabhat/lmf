@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 
 
-def rms(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+def rms(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
     """RMS-normalise the last dimension."""
     return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + eps)
 

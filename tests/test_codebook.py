@@ -38,3 +38,14 @@ def test_geometric_roundtrip_recall():
 def test_build_codebook_dispatch():
     assert isinstance(build_codebook("lowrank", 10, 8, 4), LowRankCodebook)
     assert isinstance(build_codebook("geometric", 10, 8, 4), GeometricCodebook)
+
+
+def test_logits_from_weight_matches_logits():
+    """decode_weight()+logits_from_weight() (advance()'s cached path) must agree
+    with logits() exactly — they're the same computation, just letting the
+    caller reuse one decode_weight() across several logits_from_weight() calls
+    instead of reconstructing it every time."""
+    torch.manual_seed(0)
+    for cb in (LowRankCodebook(64, 32, 8), GeometricCodebook(64, 32)):
+        field = torch.randn(3, 32)
+        assert torch.allclose(cb.logits(field), cb.logits_from_weight(field, cb.decode_weight()))

@@ -120,10 +120,24 @@ def run_cell(cell: Cell, base_raw: dict[str, Any], spec: AblationSpec) -> CellRe
                 trainer.train_steps(steps, batch_size, seq_len, log_every=0, callbacks=callbacks)
             train_seconds = time.perf_counter() - t0
 
-            bpt = trainer.evaluate_bpt(
-                batch_size, seq_len, n_batches=int(spec.eval.get("n_batches", 10)), split=split)
-            metrics = {"bits_per_token": bpt,
-                       **gather_extra_metrics(model, corpus, trainer, run, spec.eval)}
+            lm_quality = trainer.evaluate_lm_metrics(
+                batch_size,
+                seq_len,
+                n_batches=int(spec.eval.get("n_batches", 10)),
+                split=split,
+            )
+            metrics = {
+                **lm_quality,
+                "optimizer_steps": float(trainer.step),
+                "training_tokens": float(trainer.tokens_seen),
+                "supervised_training_tokens": float(
+                    trainer.supervised_tokens_seen
+                ),
+                "training_tokens_per_second": (
+                    float(trainer.tokens_seen) / max(train_seconds, 1e-9)
+                ),
+                **gather_extra_metrics(model, corpus, trainer, run, spec.eval),
+            }
     except FloatingPointError as exc:
         status, error = "diverged", str(exc)
     except BypassError as exc:

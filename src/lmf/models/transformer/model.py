@@ -18,6 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ...core.registry import MODELS
+from ...core.rope import apply_rope
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,18 @@ class TransformerConfig:
     hierarchy_aux_max_bytes: int = 16
 
     def __post_init__(self) -> None:
+        if self.vocab_size < 2:
+            raise ValueError("vocab_size must be at least 2")
+        if self.dim < 8:
+            raise ValueError("dim must be at least 8")
+        if self.layers < 1:
+            raise ValueError("layers must be positive")
+        if self.heads < 1 or self.dim % self.heads:
+            raise ValueError("dim must be divisible by heads")
+        if (self.dim // self.heads) % 2:
+            raise ValueError("attention head dimension must be even for RoPE")
+        if self.max_seq_len < 2:
+            raise ValueError("max_seq_len must be at least 2")
         if self.hierarchy_gears < 1:
             raise ValueError("hierarchy_gears must be positive")
         if self.hierarchy_output_mode not in {"factorized", "bias"}:
@@ -62,19 +75,6 @@ class RMSNorm(nn.Module):
 
     def forward(self, x):
         return x * torch.rsqrt(x.pow(2).mean(-1, keepdim=True) + self.eps) * self.weight
-
-
-def _rotate_half(x):
-    x1, x2 = x.chunk(2, dim=-1)
-    return torch.cat([-x2, x1], dim=-1)
-
-
-def _rope(x, positions):
-    head_dim = x.shape[-1]
-    inv_freq = 1.0 / (10000.0 ** (torch.arange(0, head_dim, 2, device=x.device).float() / head_dim))
-    ang = positions[:, None].float() * inv_freq[None, :]
-    ang = torch.cat([ang, ang], dim=-1).to(x.dtype)
-    return x * ang.cos()[None, None] + _rotate_half(x) * ang.sin()[None, None]
 
 
 class SwiGLU(nn.Module):
@@ -109,7 +109,7 @@ class Block(nn.Module):
         q, k, v = (t.transpose(1, 2) for t in qkv.unbind(dim=2))
         past = 0 if cache is None else cache[0].shape[2]
         positions = torch.arange(past, past + n, device=x.device)
-        q, k = _rope(q, positions), _rope(k, positions)
+        q, k = apply_rope(q, positions), apply_rope(k, positions)
         if cache is not None:
             k = torch.cat([cache[0], k], dim=2)
             v = torch.cat([cache[1], v], dim=2)
@@ -256,24 +256,57 @@ class CachedTransformerLM(nn.Module):
             )
 
     @staticmethod
-    def _full_attn_mask(attention_mask, n, device):
-        """Combine causal + key-padding into a boolean (b,1,n,n) mask (True = attend).
+    def _full_attn_mask(attention_mask, segment_ids, n, device):
+        """Combine causality, padding and packed-document isolation.
 
-        Returns None when there is no padding, so the fast is_causal path is used.
+        The returned boolean mask has shape ``(batch, 1, query, key)`` where
+        True means attend. Returns None only when the fused causal path is
+        semantically sufficient.
         """
-        if attention_mask is None or bool(attention_mask.all()):
+        no_padding = attention_mask is None or bool(attention_mask.all())
+        if no_padding and segment_ids is None:
             return None
         causal = torch.tril(torch.ones(n, n, dtype=torch.bool, device=device))
-        key_valid = attention_mask.bool()[:, None, None, :]          # (b,1,1,n)
-        return causal[None, None] & key_valid                        # (b,1,n,n)
+        mask = causal[None, None]
+        if attention_mask is not None:
+            key_valid = attention_mask.bool()[:, None, None, :]
+            mask = mask & key_valid
+        if segment_ids is not None:
+            segments = segment_ids.long()
+            same_segment = (
+                segments[:, None, :, None]
+                == segments[:, None, None, :]
+            )
+            mask = mask & same_segment
+        return mask
 
-    def _forward_hidden(self, ids, caches=None, use_cache=False, attention_mask=None):
+    def _forward_hidden(
+        self,
+        ids,
+        caches=None,
+        use_cache=False,
+        attention_mask=None,
+        segment_ids=None,
+    ):
         x = self.token(ids)
         if self.gear_embedding is not None:
             self._require_token_hierarchy()
             x = x + self.gear_embedding(self._token_gears[ids])
-        attn_mask = (self._full_attn_mask(attention_mask, ids.shape[1], ids.device)
-                     if caches is None else None)
+        if caches is not None and segment_ids is not None:
+            raise ValueError(
+                "segment_ids are supported for full packed-document forwards, "
+                "not incremental Transformer caches"
+            )
+        attn_mask = (
+            self._full_attn_mask(
+                attention_mask,
+                segment_ids,
+                ids.shape[1],
+                ids.device,
+            )
+            if caches is None
+            else None
+        )
         next_caches = []
         for i, block in enumerate(self.blocks):
             x, nc = block(x, None if caches is None else caches[i], use_cache, attn_mask)
@@ -318,17 +351,34 @@ class CachedTransformerLM(nn.Module):
             return self._hierarchical_scores(hidden)
         return self.head(hidden)
 
-    def forward(self, ids, caches=None, use_cache=False, attention_mask=None):
-        hidden, next_caches = self._forward_hidden(ids, caches, use_cache, attention_mask)
+    def forward(
+        self,
+        ids,
+        caches=None,
+        use_cache=False,
+        attention_mask=None,
+        segment_ids=None,
+    ):
+        hidden, next_caches = self._forward_hidden(
+            ids,
+            caches,
+            use_cache,
+            attention_mask,
+            segment_ids,
+        )
         return self._output_scores(hidden), next_caches
 
     @staticmethod
-    def _valid_targets(tokens, loss_mask, attention_mask):
+    def _valid_targets(tokens, loss_mask, attention_mask, segment_ids=None):
         valid = torch.ones_like(tokens[:, 1:], dtype=torch.bool)
         if loss_mask is not None:
             valid = valid & loss_mask[:, 1:].bool()
         if attention_mask is not None:
             valid = valid & attention_mask[:, 1:].bool()
+        if segment_ids is not None:
+            valid = valid & (
+                segment_ids[:, 1:] == segment_ids[:, :-1]
+            )
         return valid
 
     def _flat_language_modeling_loss(self, hidden, targets, valid):
@@ -408,10 +458,20 @@ class CachedTransformerLM(nn.Module):
         meta = task_metadata or {}
         attention_mask = meta.get("attention_mask")
         loss_mask = meta.get("loss_mask")
-        hidden, _ = self._forward_hidden(tokens, attention_mask=attention_mask)
+        segment_ids = meta.get("segment_ids")
+        hidden, _ = self._forward_hidden(
+            tokens,
+            attention_mask=attention_mask,
+            segment_ids=segment_ids,
+        )
         prediction_hidden = hidden[:, :-1]
         targets = tokens[:, 1:]
-        valid = self._valid_targets(tokens, loss_mask, attention_mask)
+        valid = self._valid_targets(
+            tokens,
+            loss_mask,
+            attention_mask,
+            segment_ids,
+        )
         scales = loss_term_scales or {}
         if (
             self.config.hierarchical_output
@@ -477,6 +537,12 @@ class CachedTransformerLM(nn.Module):
     @torch.no_grad()
     def generate(self, prompt, max_new_tokens, sampling_config=None):
         """KV-cached decoding honouring SamplingConfig (greedy by default)."""
+        if max_new_tokens < 0:
+            raise ValueError("max_new_tokens must be non-negative")
+        if max_new_tokens == 0:
+            return torch.empty(
+                prompt.shape[0], 0, dtype=torch.long, device=prompt.device
+            )
         if (
             self.config.hierarchical_output
             and self.config.hierarchy_output_mode == "factorized"
@@ -487,8 +553,10 @@ class CachedTransformerLM(nn.Module):
             logits, caches = self(prompt, use_cache=True)
             token = self._sample_token(logits[:, -1], sampling_config)
         out = []
-        for _ in range(max_new_tokens):
+        for index in range(max_new_tokens):
             out.append(token)
+            if index + 1 == max_new_tokens:
+                break
             if (
                 self.config.hierarchical_output
                 and self.config.hierarchy_output_mode == "factorized"

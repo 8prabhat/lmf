@@ -1,14 +1,15 @@
-# Baseline-vs-gear comparison. The baseline cell is the modern Transformer
-# from configs/gear_transformer.yaml::transformer_matched_smoke. Named variants
-# switch the model family to gear_transformer with matched dim/layers/heads.
+# Parameter-matched baseline-vs-gear comparison. All cells use the same corpus,
+# tokenizer, sampled training windows, optimizer-update count, batch size, and
+# sequence length. The baseline is widened to match total gear-model capacity;
+# it is not merely the smaller Transformer trunk embedded inside the gear model.
 
 ablation:
   name: gear_transformer_vs_baselines
   base_config: configs/gear_transformer.yaml
-  base_block: transformer_matched_smoke
+  base_block: transformer_parameter_matched_smoke
   mode: named_variants
   variants:
-    - name: gear_dilated_full
+    - name: gear_v5_stacked_parallel
       overrides:
         model:
           name: gear_transformer
@@ -17,18 +18,40 @@ ablation:
           layers: 4
           heads: 4
           max_seq_len: 1024
-          num_gears: 4
-          gear_speeds: [1, 4, 16, 64]
-          gear_slots: [32, 32, 16, 16]
-          gear_receptive_fields: [8, 32, 96, 192]
-          gear_update_mode: dilated
-          gear_layer_strategy: upper_alternate
+          num_gears: 5
+          gear_dim: 16
+          gear_system: parallel_v5
+          gear_lane_sizes: [2, 1, 1, 1]
+          gear_speeds: [1.4, 0.7, 0.3, 0.11, 0.035]
+          gear_slots: [24, 20, 16, 12, 12]
+          gear_receptive_fields: [4, 16, 64, 256, 1024]
+          gear_update_mode: parallel
+          gear_rotation_dims: 16
+          gear_layer_strategy: explicit
+          gear_layers: [0, 3]
+          gear_bank_temporal_strides: [1, 4]
+          phase_coupling_topology: adjacent_anchor
+          temporal_context_retention: 0.85
+          interbank_coupling_init: 0.15
+          gear_lr_multiplier: 1.0
           future_horizons: [4, 16]
           future_loss_weight: 0.05
           future_contrastive_weight: 0.0
+          future_residual_init: 0.05
           diversity_loss_weight: 0.001
+          slot_usage_loss_weight: 0.003
+          lane_prediction_horizons: [1, 2, 4, 8]
+          lane_prediction_loss_weight: 0.01
           alignment_loss_weight: 0.01
           consistency_loss_weight: 0.01
+          gear_warmup_steps: 0
+          gear_ramp_steps: 20
+          phase_warmup_steps: 0
+          phase_ramp_steps: 20
+          auxiliary_warmup_steps: 20
+          auxiliary_ramp_steps: 40
+          future_warmup_steps: 20
+          future_ramp_steps: 40
         trainer:
           name: gear_transformer
     - name: gear_no_aux
@@ -40,18 +63,41 @@ ablation:
           layers: 4
           heads: 4
           max_seq_len: 1024
-          num_gears: 4
-          gear_speeds: [1, 4, 16, 64]
-          gear_slots: [32, 32, 16, 16]
-          gear_receptive_fields: [8, 32, 96, 192]
-          gear_update_mode: dilated
-          gear_layer_strategy: upper_alternate
+          num_gears: 5
+          gear_dim: 16
+          gear_system: parallel_v5
+          gear_lane_sizes: [2, 1, 1, 1]
+          gear_speeds: [1.4, 0.7, 0.3, 0.11, 0.035]
+          gear_slots: [24, 20, 16, 12, 12]
+          gear_receptive_fields: [4, 16, 64, 256, 1024]
+          gear_update_mode: parallel
+          gear_rotation_dims: 16
+          gear_layer_strategy: explicit
+          gear_layers: [0, 3]
+          gear_bank_temporal_strides: [1, 4]
+          gear_lr_multiplier: 1.0
           future_horizons: [4, 16]
           future_loss_weight: 0.0
+          future_token_loss_weight: 0.0
           future_contrastive_weight: 0.0
+          future_logit_weight: 0.0
+          future_residual_init: 0.05
           diversity_loss_weight: 0.0
+          slot_usage_loss_weight: 0.0
+          lane_prediction_horizons: [1, 2, 4, 8]
+          lane_prediction_loss_weight: 0.0
+          lane_token_loss_weight: 0.0
+          phase_lock_loss_weight: 0.0
           alignment_loss_weight: 0.0
           consistency_loss_weight: 0.0
+          gear_warmup_steps: 0
+          gear_ramp_steps: 20
+          phase_warmup_steps: 0
+          phase_ramp_steps: 20
+          auxiliary_warmup_steps: 0
+          auxiliary_ramp_steps: 0
+          future_warmup_steps: 0
+          future_ramp_steps: 0
         trainer:
           name: gear_transformer
     - name: transformer_future_only
@@ -65,20 +111,30 @@ ablation:
           max_seq_len: 1024
           num_gears: 0
           gear_layer_strategy: none
+          gear_lr_multiplier: 1.0
           future_horizons: [4, 16]
           future_loss_weight: 0.05
           diversity_loss_weight: 0.0
+          lane_prediction_loss_weight: 0.0
           alignment_loss_weight: 0.0
           consistency_loss_weight: 0.01
+          gear_warmup_steps: 0
+          gear_ramp_steps: 0
+          phase_warmup_steps: 0
+          phase_ramp_steps: 0
+          auxiliary_warmup_steps: 20
+          auxiliary_ramp_steps: 40
+          future_warmup_steps: 20
+          future_ramp_steps: 40
         trainer:
           name: gear_transformer
-  seeds: [0]
+  seeds: [0, 1, 2]
   run:
-    steps: 30
-    batch_size: 4
-    seq_len: 64
+    steps: 200
+    batch_size: 8
+    seq_len: 128
   eval:
-    n_batches: 3
+    n_batches: 10
     split: valid
   metric: bits_per_token
   goal: minimize

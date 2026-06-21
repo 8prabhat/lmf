@@ -32,6 +32,13 @@ class RHCAConfig:
     memory_write_temperature: float = 3.0
     tail_size: int = 512             # review Q6: full-seq exact recall, SDPA-backed
     local_kernel_size: int = 7
+    # Rotary relative position encoding on the tail-attention path (query phase =
+    # frontier draft offset, key phase = tail-slot distance into the past).
+    # Without it, tail attention is pure content addressing, which cannot reliably
+    # learn a fixed-distance copy task (e.g. "the token N back") — confirmed via
+    # direct ablation: the model failed to learn the procedural corpus's echo task
+    # even after thousands of steps. Ablatable like the codebook strategy switch.
+    tail_rope: bool = True
     # Hypotheses are reserved for future adaptive-expansion work; the current LM
     # decoder runs single-hypothesis (review Q5 + external finding 3 — keeping
     # width>1 only created untrained, dead parameter rows). >1 is allowed but unused.

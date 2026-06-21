@@ -25,12 +25,23 @@ class TrainingBatch:
     metadata: dict[str, Any] = field(default_factory=dict)
 
     def to(self, device: torch.device | str) -> "TrainingBatch":
+        def move(value):
+            if torch.is_tensor(value):
+                return value.to(device)
+            if isinstance(value, dict):
+                return {key: move(item) for key, item in value.items()}
+            if isinstance(value, tuple):
+                return tuple(move(item) for item in value)
+            if isinstance(value, list):
+                return [move(item) for item in value]
+            return value
+
         return TrainingBatch(
             self.tokens.to(device),
             self.attention_mask.to(device),
             self.loss_mask.to(device),
             self.task,
-            self.metadata,
+            move(self.metadata),
         )
 
     @property

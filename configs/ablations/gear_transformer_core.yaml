@@ -1,5 +1,5 @@
-# One-at-a-time ablations over the gear model itself. This isolates update mode,
-# layer placement, future loss, diversity, and alignment calibration.
+# One-at-a-time V5 ablations covering multi-rate banks, mechanical coupling,
+# causal carriers, prediction objectives, and routing regularization.
 
 ablation:
   name: gear_transformer_core
@@ -7,30 +7,63 @@ ablation:
   base_block: smoke
   mode: one_at_a_time
   axes:
-    - path: model.gear_update_mode
-      values: [chunked, dilated, scan]
-      label: update_mode
-    - path: model.gear_layer_strategy
-      values: [upper_alternate, upper_half, all]
-      label: gear_layers
+    - path: model.gear_rotation_dims
+      values: [0, 8, 16]
+      label: rotation_dims
+    - path: model.gear_bank_temporal_strides
+      values: [[1, 2], [1, 4], [1, 8]]
+      label: bank_temporal_strides
     - path: model.gear_dim
       values: [64, 96, 128]
       label: gear_dim
-    - path: model.gear_write_summary
-      values: [false, true]
-      label: write_summary
-    - path: model.cross_gear_coupling
-      values: [false, true]
-      label: cross_gear_coupling
-    - path: model.gear_coupling_init
+    - path: model.phase_coupling_init
+      values: [0.0, 0.12, 0.25]
+      label: phase_coupling_init
+    - path: model.phase_coupling_topology
+      values: [dense_lower, adjacent_anchor]
+      label: coupling_topology
+    - path: model.phase_lock_loss_weight
+      values: [0.0, 0.002, 0.01]
+      label: phase_lock
+    - path: model.temporal_context_retention
+      values: [0.7, 0.85, 0.95]
+      label: temporal_context
+    - path: model.interbank_coupling_init
+      values: [0.0, 0.15, 0.30]
+      label: interbank_coupling
+    - path: model.phase_modulation_scale
+      values: [0.0, 0.35, 0.75]
+      label: phase_modulation
+    - path: model.gear_routing_floor
+      values: [0.0, 0.08, 0.20]
+      label: gear_routing_floor
+    - path: model.lane_routing_floor
+      values: [0.0, 0.12, 0.25]
+      label: lane_routing_floor
+    - path: model.lane_mixing_init
       values: [0.0, 0.05, 0.15]
-      label: coupling_init
+      label: lane_mixing
     - path: model.future_loss_weight
       values: [0.0, 0.05]
       label: future_loss
     - path: model.diversity_loss_weight
       values: [0.0, 0.001]
       label: diversity_loss
+    - path: model.slot_usage_loss_weight
+      values: [0.0, 0.003]
+      label: slot_usage_loss
+    - path: model.lane_prediction_loss_weight
+      values: [0.0, 0.01, 0.02]
+      label: lane_prediction_loss
+    - path: model.lane_token_loss_weight
+      values: [0.0, 0.005]
+      label: lane_token_loss
+    - path: model.future_token_loss_weight
+      values: [0.0, 0.01]
+      label: future_token_loss
+    - path: model.future_logit_weight
+      values: [0.0, 1.0]
+      label: future_logits
     - path: model.alignment_loss_weight
       values: [0.0, 0.01]
       label: alignment_loss
@@ -39,11 +72,11 @@ ablation:
       label: consistency_loss
   seeds: [0]
   run:
-    steps: 30
+    steps: 200
     batch_size: 4
-    seq_len: 64
+    seq_len: 128
   eval:
-    n_batches: 3
+    n_batches: 10
     split: valid
   metric: bits_per_token
   goal: minimize

@@ -47,6 +47,56 @@ choosing the next iteration, not final benchmarks.
 
 ## 3. Gear Transformer Findings (attention + gear residual)
 
+V5 adds stacked parallel banks, causal context carriers, sparse adjacent/anchor
+phase meshing, gated bank-to-bank carriers, direct future-token supervision,
+and true multi-rate bank execution. The efficient profile uses five gears in
+each of two banks; the fast bank updates every token and the slow bank every
+fourth token. Full three-bank/nine-gear configurations remain supported.
+
+**Fair 300 + 300 update development result** on the repeated narrative corpus:
+both models first receive 300 Transformer updates, then either the Transformer
+or the warm-started V5 model receives the same 300 additional updates.
+
+| model | params | valid NLL | valid bits/token | continuation seconds |
+| --- | ---: | ---: | ---: | ---: |
+| continued Transformer | 261,792 | **0.5787** | **0.8350** | **2.23** |
+| V5 stacked parallel gears | 303,113 | 0.8521 | 1.2293 | 6.54 |
+
+V5 forward throughput is 40.7% of the small matched Transformer and measured
+training throughput is 37.7%. Multi-rate execution and skipping diagnostic
+objectives on alternating steps materially improve V4's cost, but V5 remains a
+research architecture rather than a production replacement.
+
+Every tested V5 mechanism had positive held-out ablation impact in the final
+run: complete gears +0.00395 NLL, phase/rotation about +0.00278, temporal
+context +0.00013, future prediction +0.01937, fast bank +0.00344, and slow bank
+at +0.00055. Sparse phase and explicit inter-bank coupling were positive but very
+small (about +0.00004 and +0.000005 NLL), so larger-corpus confirmation is
+still required. Full results and generated predictions are in
+`outputs/gear_transformer_v5_acceptance_results.json`.
+
+V4 replaces the earlier sequential V3 controller with parallel local, phrase,
+semantic, and discourse gear trains. It uses positive-only phase velocity,
+geometric rotation of latent memory pairs, a state-dependent affine rotational
+scan, hierarchical lane fusion, routing floors, staged activation, and
+gear-specific learning rates.
+
+**Matched 500-update development result** on the repeated narrative corpus:
+
+| model | params | valid bits/token | training seconds |
+| --- | ---: | ---: | ---: |
+| matched Transformer | 387,552 | **0.2996** | 7.5 |
+| V3 gear model | 389,299 | 0.6450 | 110.7 |
+| V4 parallel gears | 379,300 | 0.4512 | 63.8 |
+| V4 + lane horizon supervision | 379,300 | 0.4537 | 72.2 |
+
+V4 materially improves over V3 but still does not beat the matched Transformer.
+Removing the complete V4 gear path increased held-out NLL by about 0.016;
+removing phase/rotation increased it by about 0.004. These effects are small but
+no longer diagnostic noise. Lane supervision improved slow-lane utilization
+but did not improve 500-step held-out loss, so its default weight remains
+conservative.
+
 The gear path augments a standard Transformer block with a phase-conditioned
 side channel: write gates, a causal per-gear summary, cross-gear message
 passing, and read gates back into the token stream (V2 mechanism; V1 was a

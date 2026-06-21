@@ -44,7 +44,27 @@ smoke:
     total_steps: 200
     grad_accum_steps: 1
     segment_len: 16
-    max_train_windows: 2
+    # commit_token loss now scores only the max_commit-wide committed block per
+    # window (matching advance()), not the full frontier_size draft. An
+    # AGGREGATE wall-clock-matched comparison (windows=2 vs 8) showed no benefit
+    # from more windows — but that aggregate is dominated by abundant, easy
+    # positions. Measured directly on the procedural corpus's echo task (a rare,
+    # 1-in-8 positions, long-range copy pattern): windows=2 never learns it even
+    # after 12,000 steps (echo loss stays at the chance floor), because too few
+    # windows means too few echo examples land in any given optimizer step.
+    # windows=8 (with tail_rope) drops echo loss from ~6.2 (chance) to ~1.9,
+    # confirming the architecture's signature exact-recall capability actually
+    # works once it's not starved of rare-pattern signal. ~3x slower per step
+    # (settle cost scales with window count) — a deliberate, measured tradeoff,
+    # not a default left over from before the commit-window loss fix.
+    max_train_windows: 8
+    # One-batch-ahead background prefetch (data/prefetch.py): overlaps CPU-side
+    # sampling/host->device copy with the previous step's backward pass. Was
+    # implemented but never enabled in this config. Caveat: the prefetch thread
+    # consumes the corpus RNG out of step with the main thread, so exact
+    # step-by-step reproducibility across runs/checkpoint-resume is weaker with
+    # this on (the corpus's own train/valid/test generators are still disjoint).
+    prefetch: true
   run:
     batch_size: 8
     seq_len: 128
@@ -85,7 +105,13 @@ production_v4:
     total_steps: 20000
     grad_accum_steps: 4
     segment_len: 32
-    max_train_windows: 2
+    # See smoke block's comment: measured directly on the echo task, not
+    # guessed — windows=2 starves rare/long-range patterns of training signal.
+    max_train_windows: 8
+    # See smoke block's comment: free wall-clock win, no architecture change.
+    # Caveat: weakens exact step-by-step reproducibility (prefetch thread RNG
+    # timing), not the train/valid/test split disjointness.
+    prefetch: true
   run:
     batch_size: 8
     seq_len: 512

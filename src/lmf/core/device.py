@@ -27,11 +27,23 @@ def resolve_device(name: str | None = None) -> torch.device:
         if torch.backends.mps.is_available():
             return torch.device("mps")
         return torch.device("cpu")
-    if name == "cuda" and torch.cuda.is_available():
+    if name == "cpu":
+        return torch.device("cpu")
+    if name == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "CUDA was explicitly requested but is not available; "
+                "silent CPU fallback is disabled"
+            )
         return torch.device("cuda")
-    if name == "mps" and torch.backends.mps.is_available():
+    if name == "mps":
+        if not torch.backends.mps.is_available():
+            raise RuntimeError(
+                "MPS was explicitly requested but is not available in this "
+                "Python/PyTorch environment; silent CPU fallback is disabled"
+            )
         return torch.device("mps")
-    return torch.device(name if name == "cpu" else "cpu")
+    raise ValueError(f"unknown device: {name!r}")
 
 
 def sync(device: torch.device) -> None:
@@ -67,6 +79,11 @@ class PrecisionPolicy:
         model owns this knowledge; the policy merely honours it.
         """
         model = model.to(device)
+        if getattr(model, "force_fp32_parameters", False):
+            # Pure Parallel Gear keeps persistent dynamics, parameters, and
+            # optimizer moments in FP32. This is deliberately conservative on
+            # MPS, where mixed dtypes inside one graph remain fragile.
+            return model.float()
         if self.precision == "bf16" and device.type == "mps":
             # Uniform cast: avoids the MPS graph type-mixing crash autocast triggers.
             model = model.to(torch.bfloat16)

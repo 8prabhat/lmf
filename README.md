@@ -17,7 +17,9 @@ src/lmf/
     native/        MultiGear-native baselines: MECM, MCPM, MGCF, MRWT
     rhca/           rolling-frontier family (config, codebook, memory, dynamics, settle, model, trainer)
     transformer/    parameter-matched baseline family + MGHT
-    gear_transformer/ Gear Transformer family: gear_transformer, mlgt, gear_only
+    gear_transformer/ Historical Transformer/gear hybrid family
+    pure_parallel_gear/ Canonical attention-free persistent-rotor LM
+    gru/            recurrent control baseline for Pure Gear studies
     opet/            OPET phase-enriched embedding family
   experiments/  falsification kernels (RFK gates)
   cli/          single `lmf` entrypoint: train | eval | generate | rfk
@@ -61,8 +63,10 @@ recommendations behind each one.
 | `transformer` | baseline | RMSNorm + RoPE + SwiGLU + SDPA decoder-only Transformer, parameter-matched reference for every other family | `configs/transformer_baseline.yaml` |
 | `rhca` | RHCA | rolling-frontier model: bounded carried-state windows, factorized codebook, unshared deep macro steps, entropy-based block commits, SDPA exact-recall tail | `configs/rhca_v4.yaml` |
 | `opet` | OPET | `transformer` baseline with phase-enriched token embeddings (`OPETEmbedding`) and a coherence auxiliary loss | `configs/opet_baseline.yaml` |
-| `gear_transformer` (alias `mlgt`) | Gear Transformer | full Transformer trunk plus a phase-conditioned gear side-channel with write/update/cross-gear-coupling/read stages | `configs/gear_transformer.yaml` |
+| `gear_transformer` (alias `mlgt`) | Stacked Parallel Gear Transformer V5 | Transformer trunk plus multi-rate banks of 5–20 positive-velocity rotating memories with causal and inter-bank carriers | `configs/gear_transformer.yaml` |
 | `gear_only` | Gear Transformer | the same gear mechanism with causal self-attention removed entirely | `configs/gear_transformer.yaml` |
+| `pure_parallel_gear` | Pure Parallel Gear | attention-free LM whose only cross-token state is independently rotating rotor banks with explicit noncommutative sentence-boundary clutches and a constant-size generation cache | `configs/pure_parallel_gear.yaml` |
+| `gru_lm` | GRU control | parameter-matched recurrent control used to distinguish gear-specific gains from generic recurrence | benchmark-generated |
 | `mght` | MultiGear-native | `transformer` plus a learned MultiGear input-gear embedding and hierarchical (`bias`/`factorized`) gear-aware output head | `configs/generative_mecm_iteration.yaml` |
 | `mecm` | MultiGear-native | non-Transformer causal long-convolution trunk with a zero-gated mesh residual | `configs/multigear_native_models.yaml` |
 | `mcpm` | MultiGear-native | non-Transformer surface model with a zero-gated deterministic execution-trace adapter | `configs/multigear_native_models.yaml` |
@@ -75,6 +79,64 @@ research baselines exploring whether MultiGear hierarchy or a gear side-channel
 can beat a matched Transformer + SentencePiece BPE -- as of the latest pilots
 (`docs/RESEARCH_NOTES.md`), none of them have, though `mght` and `mgcf` are the
 closest.
+
+Pure Parallel Gear’s architecture contract, mathematical mechanism, data
+preparation, gated scale workflow, and honest stopping rules are documented in
+[`docs/pure_parallel_gear.md`](docs/pure_parallel_gear.md).
+Verified implementation status and the still-unrun compute stages are recorded
+in [`docs/pure_parallel_gear_implementation_report.md`](docs/pure_parallel_gear_implementation_report.md).
+
+The canonical family deliberately contains no attention, Q/K/V projections,
+token-history retrieval, routing over previous tokens, or KV cache. SentencePiece
+BPE is shared unchanged with the Transformer and GRU controls.
+
+### Generative gear mechanism
+
+`gear_transformer` treats gears as multi-scale generation controllers.
+Configured `gear_speeds` are angular advances in radians/token and must be
+strictly decreasing from fast to slow. Learned multiplicative modulation keeps
+every phase advance positive, so a slow gear can decelerate without reversing.
+
+The efficient default uses two stacked banks. Each bank contains five
+vectorized gears grouped into local, phrase, semantic, and discourse lanes.
+The lower bank updates every token and the upper bank updates every fourth
+token while preserving elapsed phase. The architecture also supports the full
+three-bank/nine-gear form. At each active position the gear path:
+
+1. updates a vectorized causal context carrier and receives a gated carrier
+   from the preceding bank;
+2. predicts drive-only phases, then applies sparse adjacent/anchor
+   sinusoidal gear-ratio correction;
+3. selects phase-preferred latent slots;
+4. geometrically rotates paired dimensions of each persistent gear memory;
+5. applies a state-dependent recurrent update using a chunk-stable
+   closed-form affine rotation scan;
+6. fuses gears inside each train, then fuses the four trains with routing
+   floors that prevent slow-lane starvation;
+7. supervises banks and lanes at progressively longer prediction horizons; and
+8. optionally adds a late-ramped future predictor before the tied token head.
+
+`num_gears=0` remains available only as an ablation. Active gear stacks require
+5–20 gears. Training initially uses the Transformer path, then ramps gear
+residuals, phase/rotation, auxiliary lane losses, and finally future logits.
+Gear parameters use a configurable higher learning rate.
+Expensive auxiliary and future objectives can run at configurable intervals;
+the LM path and gear memories still update every scheduled bank step.
+
+For fastest convergence, build the gear model with the same trunk width/depth
+as a trained Transformer and call
+`gear_model.initialize_trunk_from_transformer(transformer_model)`. This copies
+only compatible embedding, attention, feed-forward, normalization, and LM-head
+weights; clocks, slots, lanes, and rotating memories remain independently
+initialized.
+
+The reproducible V5 acceptance benchmark includes an equal-update Transformer
+continuation, component ablations, generated predictions, and forward/training
+throughput:
+
+```bash
+PYTHONPATH=src .venv/bin/python scripts/benchmark_gear_transformer_v5.py
+```
 
 ```bash
 lmf train    --config configs/multigear_native_models.yaml --block smoke_mecm --steps 10

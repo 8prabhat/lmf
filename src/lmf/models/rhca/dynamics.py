@@ -18,7 +18,26 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ...core.rope import apply_rope
 from ._ops import rms
+
+
+def _tail_phase(h: int, tail_size: int, device, repeat: int = 1) -> tuple[torch.Tensor, torch.Tensor]:
+    """Relative position phases for tail-attention RoPE.
+
+    Query phase = frontier draft offset (frontier position 0 is the next token,
+    so phase +1..+h). Key phase = tail-slot distance into the past (the tail is
+    a FIFO buffer of exactly `tail_size` recent tokens after warmup, so slot
+    index maps monotonically to recency; phase -tail_size..-1). Only the
+    difference between query and key phase affects RoPE's attention scores, so
+    this convention doesn't need a shared absolute clock — it only needs to be
+    applied identically here for every settle call, train or inference.
+    """
+    query_pos = torch.arange(1, h + 1, device=device, dtype=torch.float32)
+    if repeat > 1:
+        query_pos = query_pos.repeat_interleave(repeat)
+    key_pos = torch.arange(tail_size, device=device, dtype=torch.float32) - tail_size
+    return query_pos, key_pos
 
 
 def _read_topk(query: torch.Tensor, keys: torch.Tensor, values: torch.Tensor,
@@ -73,7 +92,11 @@ class FrontierDynamicsRule(nn.Module):
         tl = tail[:, None].expand(-1, p, -1, -1).reshape(bp, tail.shape[1], d)
         mem_ctx = _read_topk(latent, self.memory_key(mem), self.memory_value(mem),
                              self.cfg.memory_read_top_k)
-        tail_ctx = F.scaled_dot_product_attention(self.tail_q(latent), self.tail_k(tl), self.tail_v(tl))
+        tail_q, tail_k = self.tail_q(latent), self.tail_k(tl)
+        if self.cfg.tail_rope:
+            query_pos, key_pos = _tail_phase(h, tail.shape[1], frontier.device)
+            tail_q, tail_k = apply_rope(tail_q, query_pos), apply_rope(tail_k, key_pos)
+        tail_ctx = F.scaled_dot_product_attention(tail_q, tail_k, self.tail_v(tl))
         mixed = self._mix(latent + local, mem_ctx, tail_ctx)
         if context_only:
             return mixed.reshape(b, p, h, self.cfg.latent_dim)
@@ -121,7 +144,11 @@ class MultiQueryContextReader(nn.Module):
         tl = tail[:, None].expand(-1, p, -1, -1).reshape(bp, tail.shape[1], d)
         mem_ctx = _read_topk(q_all, self.memory_key(mem), self.memory_value(mem),
                              self.cfg.memory_read_top_k)
-        tail_ctx = F.scaled_dot_product_attention(self.tail_q(q_all), self.tail_k(tl), self.tail_v(tl))
+        tail_q, tail_k = self.tail_q(q_all), self.tail_k(tl)
+        if self.cfg.tail_rope:
+            query_pos, key_pos = _tail_phase(h, tail.shape[1], frontier.device, repeat=L)
+            tail_q, tail_k = apply_rope(tail_q, query_pos), apply_rope(tail_k, key_pos)
+        tail_ctx = F.scaled_dot_product_attention(tail_q, tail_k, self.tail_v(tl))
         mem_ctx = mem_ctx.reshape(bp, h, L, r)
         tail_ctx = tail_ctx.reshape(bp, h, L, r)
         base = (latent + local).unsqueeze(-2).expand(-1, -1, L, -1)

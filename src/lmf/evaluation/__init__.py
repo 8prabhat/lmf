@@ -14,6 +14,7 @@ from .metrics import (
     transformer_bits_per_token,
     transformer_lm_metrics,
 )
+from .pure_gear_tasks import PredictiveTaskCorpus
 
 __all__ = [
     "bits_per_byte",
@@ -28,4 +29,5 @@ __all__ = [
     "long_context_throughput",
     "tokens_per_settle",
     "needle_in_tail",
+    "PredictiveTaskCorpus",
 ]

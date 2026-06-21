@@ -1,0 +1,26 @@
+{
+  "protocol_version": "pure-parallel-gear-2",
+  "tokenizer": "sentencepiece_bpe",
+  "parameter_tolerance": 0.005,
+  "stages": {
+    "3m": {"seeds": 5, "tokens": 60000000},
+    "15m": {"seeds": 3, "tokens": 300000000},
+    "50m": {"seeds": 2, "tokens": 1000000000, "requires_15m_pass": true}
+  },
+  "quality_gate_15m": {
+    "macro_nll_upper_95pct_relative": 0.01,
+    "maximum_domain_mean_relative": 0.02,
+    "maximum_task_accuracy_regression": 0.03,
+    "blind_preference_lower_95pct": 0.45,
+    "must_beat_gru": true,
+    "must_significantly_beat_transformer_on_one_primary_metric": true,
+    "minimum_training_throughput_ratio": 0.5,
+    "maximum_peak_memory_ratio": 1.25
+  },
+  "final_gate_50m": {
+    "minimum_incremental_generation_speedup": 1.5,
+    "maximum_cache_ratio": 0.25,
+    "maximum_peak_training_memory_ratio": 0.8,
+    "time_to_target_noninferior": true
+  }
+}

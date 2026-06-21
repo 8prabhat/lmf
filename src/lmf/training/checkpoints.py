@@ -60,6 +60,41 @@ def load_checkpoint(path: str | Path, model, optimizer=None,
                     map_location="cpu", strict: bool = True,
                     expected_fingerprints: dict | None = None) -> dict:
     ckpt = torch.load(path, map_location=map_location, weights_only=False)
+    saved_name = ckpt.get("manifest", {}).get("name")
+    current_name = (
+        model.architecture_manifest().get("name")
+        if hasattr(model, "architecture_manifest")
+        else None
+    )
+    if current_name == "PureParallelGear" and saved_name in {
+        "PureParallelRotatingGearLM",
+        "PureParallelPredictiveGearV2",
+    }:
+        raise RuntimeError(
+            "legacy Pure Parallel Gear V1/V2 checkpoints are intentionally "
+            "incompatible with the canonical PureParallelGear architecture"
+        )
+    gear_v3_names = {
+        "PureParallelGearV3",
+        "HybridParallelGear",
+        "BoundedTransformer",
+        "BlockHybridGearV4",
+        "SelectiveHybridGearV42",
+        "GearBankRouterV43",
+    }
+    if (
+        current_name in gear_v3_names
+        and saved_name is not None
+        and saved_name != current_name
+    ) or (
+        saved_name in gear_v3_names
+        and current_name is not None
+        and current_name != saved_name
+    ):
+        raise RuntimeError(
+            "Pure Gear V2, V3, V4, hybrid, and bounded-Transformer checkpoints "
+            "are intentionally architecture-specific and cannot be cross-loaded"
+        )
     if ckpt.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError(f"unsupported checkpoint schema {ckpt.get('schema_version')!r}")
     if strict:
@@ -74,7 +109,7 @@ def load_checkpoint(path: str | Path, model, optimizer=None,
                 raise RuntimeError(
                     f"checkpoint {key} fingerprint mismatch ({saved} != {value}); "
                     "the corpus or tokenizer differs from the one trained on")
-    model.load_state_dict(ckpt["model"])
+    model.load_state_dict(ckpt["model"], strict=strict)
     if optimizer is not None and "optimizer" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer"])
     if hasattr(model, "_runtime_commit_threshold"):

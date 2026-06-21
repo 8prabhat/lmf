@@ -1,0 +1,58 @@
+# V4.4: selective block Gear with a shorter 64-token local horizon.
+default_block: screen
+
+base:
+  seed: 20262220
+  device: mps
+  precision: fp32
+  data:
+    name: pure_gear_contiguous_lanes
+    whole_windows: true
+  trainer:
+    name: selective_hybrid_gear_v42
+    stateful: true
+    tbptt_chunks: 2
+    betas: [0.9, 0.95]
+    weight_decay: 0.01
+    schedule_mode: tokens
+  model:
+    name: selective_hybrid_gear_v42
+    dim: 112
+    layers: 2
+    ffn_dim: 311
+    heads: 7
+    kv_heads: 1
+    attention_window: 64
+    block_tokens: 64
+    gear_every: 2
+    gear_placement: pre_next
+    fusion_rank: 32
+    num_banks: 4
+    gears_per_bank: 8
+    rotor_channels: 1
+    cell_dim: 12
+    bank_rank: 12
+    future_horizons: [4, 16, 64, 256]
+    future_aux_weight: 0.10
+    future_aux_decay_fraction: 0.80
+    max_seq_len: 16384
+
+screen:
+  trainer:
+    lr: 1.0e-3
+    total_training_tokens: 200000
+    warmup_tokens: 20000
+  run:
+    seeds: 3
+    batch_size: 2
+    seq_len: 512
+
+confirmation:
+  trainer:
+    lr: 1.0e-3
+    total_training_tokens: 1000000
+    warmup_tokens: 100000
+  run:
+    seeds: 3
+    batch_size: 2
+    seq_len: 512

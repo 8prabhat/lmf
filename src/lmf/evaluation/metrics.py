@@ -11,6 +11,7 @@ used by ``carried_state_training_step`` and ``advance`` (generation).
 
 from __future__ import annotations
 
+import inspect
 import math
 from contextlib import contextmanager
 from typing import Any
@@ -25,6 +26,15 @@ def _sample_batch(corpus, batch_size, seq_len, split) -> TrainingBatch:
     if hasattr(corpus, "sample_batch"):
         return corpus.sample_batch(batch_size, seq_len, split)
     return lm_batch(corpus.sample_tokenized(batch_size, seq_len, split))
+
+
+def _forward_language_model(model, batch: TrainingBatch):
+    """Forward a causal LM while passing optional batch metadata it supports."""
+    kwargs = {"attention_mask": batch.attention_mask}
+    parameters = inspect.signature(model.forward).parameters
+    if "segment_ids" in parameters and "segment_ids" in batch.metadata:
+        kwargs["segment_ids"] = batch.metadata["segment_ids"]
+    return model(batch.tokens, **kwargs)
 
 
 def _decoded_byte_count(corpus, targets: torch.Tensor, valid: torch.Tensor) -> int | None:
@@ -84,27 +94,29 @@ def rhca_lm_metrics(model, corpus, batch_size=8, seq_len=256, n_batches=10,
                 continue
             state = model.prefill(tokens[:, :h], batch.attention_mask[:, :h])
             pos = h
-            while pos + h <= n:
+            while pos + stride <= n:
                 frontier, _ = model.settle(state, active_only=True)
-                targets = tokens[:, pos:pos + h]
+                # Score only the max_commit-wide block advance() actually
+                # commits this cycle — matching calibrate_commit_threshold and
+                # carried_state_training_step, not the full frontier_size draft.
+                targets = tokens[:, pos:pos + stride]
                 _, logits = model._chain_conditioned_fields_and_logits(frontier, targets)
                 logits1 = logits[:, 0]
                 per_tok = F.cross_entropy(
                     logits1.reshape(-1, model.config.vocab_size),
-                    targets.reshape(-1), reduction="none").reshape(b, h)
-                m = valid[:, pos:pos + h]
+                    targets.reshape(-1), reduction="none").reshape(b, stride)
+                m = valid[:, pos:pos + stride]
                 nll += (per_tok * m).sum()
                 count += m.sum()
                 decoded_bytes = _decoded_byte_count(corpus, targets, m)
                 if decoded_bytes is not None:
                     byte_count += decoded_bytes
                     saw_byte_count = True
-                # Carry the SETTLED frontier forward and commit a max_commit-wide
-                # block, exactly as carried_state_training_step / advance do
-                # (finding 4) — not a single-token re-settle loop.
-                commit = tokens[:, pos:pos + stride]
+                # Carry the SETTLED frontier forward and commit the same
+                # max_commit-wide block, exactly as carried_state_training_step
+                # / advance do (finding 4) — not a single-token re-settle loop.
                 cmask = batch.attention_mask[:, pos:pos + stride]
-                state = model._advance_state(state, frontier, commit, cmask)
+                state = model._advance_state(state, frontier, targets, cmask)
                 pos += stride
     bits = float(nll.item() / math.log(2.0))
     tokens = float(count.item())
@@ -138,7 +150,7 @@ def transformer_lm_metrics(model, corpus, batch_size=8, seq_len=256, n_batches=1
     with _eval_mode(model):
         for _ in range(n_batches):
             batch = _sample_batch(corpus, batch_size, seq_len, split).to(device)
-            logits, _ = model(batch.tokens, attention_mask=batch.attention_mask)
+            logits, _ = _forward_language_model(model, batch)
             losses = F.cross_entropy(
                 logits[:, :-1].reshape(-1, logits.shape[-1]), batch.tokens[:, 1:].reshape(-1),
                 reduction="none").reshape(batch.tokens.shape[0], -1)

@@ -36,6 +36,18 @@ class _BaseCodebook(nn.Module):
     def logits(self, field: torch.Tensor) -> torch.Tensor:  # pragma: no cover
         raise NotImplementedError
 
+    def decode_weight(self) -> torch.Tensor:  # pragma: no cover - interface
+        """Reconstruct the V x D decode matrix (the part that's V*e+e*D for the
+        low-rank codebook, not free). Callers that decode the same field shape
+        repeatedly in one pass (e.g. advance()'s per-token commit loop) should
+        call this once and reuse it via logits_from_weight, instead of paying
+        the reconstruction cost on every call to logits()."""
+        raise NotImplementedError
+
+    def logits_from_weight(self, field: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        scale = self.logit_scale.exp().clamp(max=100.0)
+        return scale * (F.normalize(field, dim=-1) @ F.normalize(weight, dim=-1).t()) + self.bias
+
 
 class GeometricCodebook(_BaseCodebook):
     """Flat tied input/output geometry with a learned logit temperature."""
@@ -49,9 +61,11 @@ class GeometricCodebook(_BaseCodebook):
     def embed(self, ids: torch.Tensor) -> torch.Tensor:
         return rms(F.embedding(ids, self.weight))
 
+    def decode_weight(self) -> torch.Tensor:
+        return self.weight
+
     def logits(self, field: torch.Tensor) -> torch.Tensor:
-        scale = self.logit_scale.exp().clamp(max=100.0)
-        return scale * (F.normalize(field, dim=-1) @ F.normalize(self.weight, dim=-1).t()) + self.bias
+        return self.logits_from_weight(field, self.weight)
 
 
 class LowRankCodebook(_BaseCodebook):
@@ -69,7 +83,7 @@ class LowRankCodebook(_BaseCodebook):
         self.logit_scale = nn.Parameter(torch.tensor(math.log(10.0)))
         self.bias = nn.Parameter(torch.zeros(vocab_size))
 
-    def _weight(self) -> torch.Tensor:
+    def decode_weight(self) -> torch.Tensor:
         """Reconstruct the full V x D embedding (used for tied decoding)."""
         return self.up(self.code)
 
@@ -79,9 +93,7 @@ class LowRankCodebook(_BaseCodebook):
         return rms(self.up(F.embedding(ids, self.code)))
 
     def logits(self, field: torch.Tensor) -> torch.Tensor:
-        scale = self.logit_scale.exp().clamp(max=100.0)
-        weight = self._weight()
-        return scale * (F.normalize(field, dim=-1) @ F.normalize(weight, dim=-1).t()) + self.bias
+        return self.logits_from_weight(field, self.decode_weight())
 
 
 def build_codebook(kind: str, vocab_size: int, dim: int, factor_dim: int) -> _BaseCodebook:

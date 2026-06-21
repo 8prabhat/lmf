@@ -40,6 +40,28 @@ transformer_matched_smoke:
     seq_len: 128
     steps: 200
 
+# Parameter-matched control for the V5 smoke model below. The gear model uses
+# dim=128 plus its side paths; dim=140 keeps the modern Transformer within
+# roughly one percent of its total trainable parameter count.
+transformer_parameter_matched_smoke:
+  model:
+    name: transformer
+    vocab_size: 512
+    dim: 140
+    layers: 4
+    heads: 5
+    max_seq_len: 1024
+  trainer:
+    name: transformer
+    lr: 3.0e-3
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+  run:
+    batch_size: 8
+    seq_len: 128
+    steps: 200
+
 smoke:
   model:
     name: gear_transformer
@@ -48,20 +70,110 @@ smoke:
     layers: 4
     heads: 4
     max_seq_len: 1024
-    num_gears: 4
-    gear_speeds: [1, 4, 16, 64]
-    gear_slots: [32, 32, 16, 16]
-    gear_receptive_fields: [8, 32, 96, 192]
-    gear_update_mode: dilated
-    gear_layer_strategy: upper_alternate
+    num_gears: 5
+    gear_system: parallel_v5
+    gear_dim: 16
+    gear_lane_sizes: [2, 1, 1, 1]
+    gear_speeds: [1.4, 0.7, 0.3, 0.11, 0.035]
+    gear_slots: [24, 20, 16, 12, 12]
+    gear_receptive_fields: [4, 16, 64, 256, 1024]
+    gear_update_mode: parallel
+    gear_rotation_dims: 16
+    gear_layer_strategy: explicit
+    gear_layers: [0, 3]
+    gear_bank_temporal_strides: [1, 4]
+    phase_coupling_topology: adjacent_anchor
+    phase_coupling_init: 0.12
+    phase_coupling_max: 0.35
+    phase_lock_loss_weight: 0.002
+    temporal_context_retention: 0.85
+    interbank_coupling_init: 0.15
+    bank_specialization_strength: 0.35
+    lane_mixing_init: 0.12
+    lane_dropout: 0.05
+    routing_temperature: 1.0
     future_horizons: [4, 16]
     future_loss_weight: 0.05
+    future_token_loss_weight: 0.01
     future_contrastive_weight: 0.0
+    future_logit_weight: 0.25
+    future_residual_init: 0.05
     diversity_loss_weight: 0.001
+    slot_usage_loss_weight: 0.003
+    lane_prediction_horizons: [1, 2, 4, 8]
+    lane_prediction_loss_weight: 0.01
+    lane_token_loss_weight: 0.005
+    prediction_loss_stride: 8
     alignment_loss_weight: 0.01
     consistency_loss_weight: 0.01
+    gear_warmup_steps: 10
+    gear_ramp_steps: 40
+    phase_warmup_steps: 25
+    phase_ramp_steps: 75
+    auxiliary_warmup_steps: 50
+    auxiliary_ramp_steps: 50
+    auxiliary_loss_interval: 2
+    future_loss_interval: 2
+    future_warmup_steps: 100
+    future_ramp_steps: 100
   trainer:
     name: gear_transformer
+    lr: 3.0e-3
+    warmup_steps: 20
+    total_steps: 200
+    grad_accum_steps: 1
+    seq_len_curriculum: [32, 64, 128]
+    seq_len_curriculum_steps: [0, 50, 120]
+  run:
+    batch_size: 8
+    seq_len: 128
+    steps: 200
+
+simplified_smoke:
+  model:
+    name: simplified_gear_transformer
+    vocab_size: 512
+    dim: 128
+    layers: 4
+    heads: 4
+    max_seq_len: 1024
+    num_gears: 5
+    gear_dim: 24
+    gear_lane_sizes: [2, 1, 1, 1]
+    gear_speeds: [1.4, 0.7, 0.3, 0.11, 0.035]
+    gear_slots: [24, 20, 16, 12, 12]
+    gear_receptive_fields: [4, 16, 64, 256, 1024]
+    gear_rotation_dims: 16
+    gear_layers: [0]
+    gear_bank_temporal_strides: [1]
+    temporal_context_retention: 0.85
+    lane_mixing_init: 0.12
+    lane_dropout: 0.05
+    future_horizons: [4, 16]
+    future_dim: 96
+    future_loss_weight: 0.05
+    future_token_loss_weight: 0.01
+    future_logit_weight: 0.25
+    diversity_loss_weight: 0.001
+    slot_usage_loss_weight: 0.003
+    lane_prediction_horizons: [1, 2, 4, 8]
+    lane_prediction_loss_weight: 0.005
+    lane_token_loss_weight: 0.002
+    alignment_loss_weight: 0.005
+    consistency_loss_weight: 0.005
+    gear_warmup_steps: 0
+    gear_ramp_steps: 20
+    phase_warmup_steps: 0
+    phase_ramp_steps: 20
+    future_warmup_steps: 40
+    future_ramp_steps: 40
+    auxiliary_warmup_steps: 20
+    auxiliary_ramp_steps: 40
+    auxiliary_loss_interval: 2
+    future_loss_interval: 2
+    gear_lr_multiplier: 1.0
+  trainer:
+    name: simplified_gear_transformer
     lr: 3.0e-3
     warmup_steps: 20
     total_steps: 200
@@ -79,16 +191,31 @@ smoke_no_aux:
     layers: 4
     heads: 4
     max_seq_len: 1024
-    num_gears: 4
-    gear_speeds: [1, 4, 16, 64]
-    gear_slots: [32, 32, 16, 16]
-    gear_receptive_fields: [8, 32, 96, 192]
-    gear_update_mode: dilated
-    gear_layer_strategy: upper_alternate
+    num_gears: 5
+    gear_system: parallel_v5
+    gear_dim: 16
+    gear_lane_sizes: [2, 1, 1, 1]
+    gear_speeds: [1.4, 0.7, 0.3, 0.11, 0.035]
+    gear_slots: [24, 20, 16, 12, 12]
+    gear_receptive_fields: [4, 16, 64, 256, 1024]
+    gear_update_mode: parallel
+    gear_rotation_dims: 16
+    gear_layer_strategy: explicit
+    gear_layers: [0, 3]
+    gear_bank_temporal_strides: [1, 4]
+    phase_coupling_topology: adjacent_anchor
+    temporal_context_retention: 0.85
+    interbank_coupling_init: 0.15
+    bank_specialization_strength: 0.35
     future_horizons: [4, 16]
     future_loss_weight: 0.0
     future_contrastive_weight: 0.0
+    future_logit_weight: 0.0
+    future_residual_init: 0.05
     diversity_loss_weight: 0.0
+    slot_usage_loss_weight: 0.0
+    lane_prediction_horizons: [1, 2, 4, 8]
+    lane_prediction_loss_weight: 0.0
     alignment_loss_weight: 0.0
     consistency_loss_weight: 0.0
   trainer:
@@ -111,16 +238,27 @@ gear_only_smoke:
     heads: 4
     max_seq_len: 1024
     use_attention: false
-    num_gears: 4
-    gear_speeds: [1, 4, 16, 64]
-    gear_slots: [32, 32, 16, 16]
-    gear_receptive_fields: [8, 32, 96, 192]
-    gear_update_mode: dilated
+    num_gears: 5
+    gear_system: parallel_v5
+    gear_dim: 16
+    gear_lane_sizes: [2, 1, 1, 1]
+    gear_speeds: [1.4, 0.7, 0.3, 0.11, 0.035]
+    gear_slots: [24, 20, 16, 12, 12]
+    gear_receptive_fields: [4, 16, 64, 256, 1024]
+    gear_update_mode: parallel
+    gear_rotation_dims: 16
     gear_layer_strategy: all
+    phase_coupling_topology: adjacent_anchor
+    temporal_context_retention: 0.85
     future_horizons: [4, 16]
     future_loss_weight: 0.0
     future_contrastive_weight: 0.0
+    future_logit_weight: 0.0
+    future_residual_init: 0.05
     diversity_loss_weight: 0.0
+    slot_usage_loss_weight: 0.0
+    lane_prediction_horizons: [1, 2, 4, 8]
+    lane_prediction_loss_weight: 0.0
     alignment_loss_weight: 0.0
     consistency_loss_weight: 0.0
   trainer:
@@ -148,24 +286,51 @@ sentencepiece_smoke:
     layers: 6
     heads: 8
     max_seq_len: 2048
-    num_gears: 4
-    gear_speeds: [1, 4, 16, 64]
-    gear_slots: [64, 64, 32, 32]
-    gear_receptive_fields: [8, 32, 128, 256]
-    gear_update_mode: dilated
-    gear_layer_strategy: upper_alternate
+    num_gears: 5
+    gear_system: parallel_v5
+    gear_dim: 32
+    gear_lane_sizes: [2, 1, 1, 1]
+    gear_speeds: [1.4, 0.7, 0.3, 0.11, 0.035]
+    gear_slots: [48, 40, 32, 24, 24]
+    gear_receptive_fields: [4, 16, 64, 256, 1024]
+    gear_update_mode: parallel
+    gear_rotation_dims: 32
+    gear_layer_strategy: explicit
+    gear_layers: [1, 5]
+    gear_bank_temporal_strides: [1, 4]
+    phase_coupling_topology: adjacent_anchor
+    phase_coupling_init: 0.12
+    phase_coupling_max: 0.35
+    phase_lock_loss_weight: 0.002
+    temporal_context_retention: 0.90
+    interbank_coupling_init: 0.15
+    bank_specialization_strength: 0.35
+    lane_mixing_init: 0.12
+    lane_dropout: 0.05
     future_horizons: [8, 32]
     future_loss_weight: 0.05
+    future_token_loss_weight: 0.01
+    future_logit_weight: 0.25
+    future_residual_init: 0.05
     diversity_loss_weight: 0.001
+    slot_usage_loss_weight: 0.003
+    lane_prediction_horizons: [1, 2, 4, 8]
+    lane_prediction_loss_weight: 0.01
+    lane_token_loss_weight: 0.005
+    prediction_loss_stride: 8
     alignment_loss_weight: 0.01
     consistency_loss_weight: 0.01
+    auxiliary_loss_interval: 2
+    future_loss_interval: 2
   trainer:
     name: gear_transformer
     lr: 3.0e-4
     warmup_steps: 100
     total_steps: 2000
     grad_accum_steps: 4
-    prefetch: true
+    prefetch: false
+    seq_len_curriculum: [128, 256, 512]
+    seq_len_curriculum_steps: [0, 500, 1200]
   run:
     batch_size: 4
     seq_len: 512
@@ -212,16 +377,27 @@ sentencepiece_gear_only_smoke:
     heads: 8
     max_seq_len: 2048
     use_attention: false
-    num_gears: 4
-    gear_speeds: [1, 4, 16, 64]
-    gear_slots: [64, 64, 32, 32]
-    gear_receptive_fields: [8, 32, 128, 256]
-    gear_update_mode: dilated
+    num_gears: 5
+    gear_system: parallel_v5
+    gear_dim: 32
+    gear_lane_sizes: [2, 1, 1, 1]
+    gear_speeds: [1.4, 0.7, 0.3, 0.11, 0.035]
+    gear_slots: [48, 40, 32, 24, 24]
+    gear_receptive_fields: [4, 16, 64, 256, 1024]
+    gear_update_mode: parallel
+    gear_rotation_dims: 32
     gear_layer_strategy: all
+    phase_coupling_topology: adjacent_anchor
+    temporal_context_retention: 0.90
     future_horizons: [8, 32]
     future_loss_weight: 0.0
     future_contrastive_weight: 0.0
+    future_logit_weight: 0.0
+    future_residual_init: 0.05
     diversity_loss_weight: 0.0
+    slot_usage_loss_weight: 0.0
+    lane_prediction_horizons: [1, 2, 4, 8]
+    lane_prediction_loss_weight: 0.0
     alignment_loss_weight: 0.0
     consistency_loss_weight: 0.0
   trainer:

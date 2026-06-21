@@ -59,6 +59,21 @@ def test_padding_mask_changes_logits():
     assert not torch.allclose(out_full, out_pad)
 
 
+def test_packed_document_segments_are_isolated():
+    model = _model().eval()
+    tokens = torch.randint(0, 64, (1, 12))
+    segments = torch.tensor([[0] * 6 + [1] * 6])
+    logits, _ = model(tokens, segment_ids=segments)
+    changed = tokens.clone()
+    changed[:, :6] = (changed[:, :6] + 17) % 64
+    changed_logits, _ = model(changed, segment_ids=segments)
+    assert torch.allclose(
+        logits[:, 6:],
+        changed_logits[:, 6:],
+        atol=1e-5,
+    )
+
+
 def test_trainer_and_bpt():
     corpus = ProceduralCorpus(vocab_size=64)
     model = _model()

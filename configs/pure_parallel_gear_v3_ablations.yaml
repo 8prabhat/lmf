@@ -1,0 +1,52 @@
+# Retrained causal ablations for the V3/hybrid program.
+# Every variant must be trained from a fresh seed-matched initialization.
+ablations:
+  no_gear_branch:
+    model:
+      name: bounded_transformer
+    interpretation: Hybrid minus Gear, using the identical local attention and FFN.
+
+  no_local_attention:
+    model:
+      name: pure_parallel_gear_v3
+    interpretation: Hybrid minus bounded local attention.
+
+  stateless_training:
+    trainer:
+      name: pure_parallel_gear_v3
+      stateful: false
+    interpretation: Same architecture retrained without carried document state.
+
+  no_future_state_objective:
+    model:
+      future_aux_weight: 0.0
+    interpretation: Same architecture retrained with next-token loss only.
+
+  unordered_timescales:
+    model:
+      enforce_timescale_hierarchy: false
+      half_life_bands:
+        - [4, 2048]
+        - [4, 2048]
+        - [4, 2048]
+        - [4, 2048]
+      period_bands:
+        - [4, 2048]
+        - [4, 2048]
+        - [4, 2048]
+        - [4, 2048]
+    interpretation: Removes structural bank ordering while retaining rotor count.
+
+  old_flattened_readout:
+    model:
+      name: pure_parallel_gear
+      boundary_settling: false
+      use_predictor_gear: false
+    interpretation: V2 flattened readout control without boundary settling.
+
+  old_boundary_settling:
+    model:
+      name: pure_parallel_gear
+      boundary_settling: true
+      use_predictor_gear: false
+    interpretation: V2 flattened readout plus sequential boundary settling.
