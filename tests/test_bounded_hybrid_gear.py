@@ -7,7 +7,7 @@ import torch
 
 from lmf.core.registry import MODELS, TRAINERS
 from lmf.data import TrainingBatch
-from lmf.models.pure_parallel_gear_v3 import (
+from lmf.models.bounded_hybrid_gear import (
     BoundedTransformerConfig,
     BoundedTransformerLM,
     BlockHybridGearV4Config,
@@ -70,7 +70,7 @@ def bounded_config(**overrides):
     return BoundedTransformerConfig(**values)
 
 
-def v4_config(**overrides):
+def block_additive_config(**overrides):
     values = {
         "vocab_size": 97,
         "dim": 32,
@@ -89,22 +89,22 @@ def v4_config(**overrides):
     return BlockHybridGearV4Config(**values)
 
 
-def v42_config(**overrides):
+def block_selective_film_config(**overrides):
     values = {
         "fusion_mode": "selective_film",
         "fusion_rank": 8,
     }
     values.update(overrides)
-    return v4_config(**values)
+    return block_additive_config(**values)
 
 
-def v43_config(**overrides):
+def block_bank_router_config(**overrides):
     values = {
         "fusion_mode": "bank_router",
         "fusion_rank": 8,
     }
     values.update(overrides)
-    return v4_config(**values)
+    return block_additive_config(**values)
 
 
 def masks(tokens):
@@ -124,36 +124,36 @@ def _sequential(multiplier, bias, initial):
     return torch.stack(rows, dim=1)
 
 
-def test_v3_families_are_registered():
+def test_bounded_hybrid_gear_families_are_registered():
     for name in (
         "pure_parallel_gear_v3",
         "hybrid_parallel_gear",
         "bounded_transformer",
-        "block_hybrid_gear_v4",
-        "selective_hybrid_gear_v42",
-        "gear_bank_router_v43",
+        "bounded_hybrid_gear_block_additive",
+        "bounded_hybrid_gear_block_selective_film",
+        "bounded_hybrid_gear_block_bank_router",
     ):
         assert name in MODELS
         assert name in TRAINERS
 
 
-def test_v3_checkpoint_cannot_cross_architectures(tmp_path):
+def test_bounded_hybrid_gear_checkpoint_cannot_cross_architectures(tmp_path):
     strict = PureParallelGearV3LM(strict_config(layers=1))
     optimizer = torch.optim.AdamW(strict.parameters(), lr=1e-3)
-    path = tmp_path / "strict-v3.pt"
+    path = tmp_path / "strict.pt"
     save_checkpoint(path, strict, optimizer, step=0)
     hybrid = HybridParallelGearLM(hybrid_config(layers=1))
     with pytest.raises(RuntimeError, match="architecture-specific"):
         load_checkpoint(path, hybrid)
-    v4 = BlockHybridGearV4LM(v4_config())
+    block_additive = BlockHybridGearV4LM(block_additive_config())
     with pytest.raises(RuntimeError, match="architecture-specific"):
-        load_checkpoint(path, v4)
-    v42 = BlockHybridGearV4LM(v42_config())
+        load_checkpoint(path, block_additive)
+    block_selective_film = BlockHybridGearV4LM(block_selective_film_config())
     with pytest.raises(RuntimeError, match="architecture-specific"):
-        load_checkpoint(path, v42)
-    v43 = BlockHybridGearV4LM(v43_config())
+        load_checkpoint(path, block_selective_film)
+    block_bank_router = BlockHybridGearV4LM(block_bank_router_config())
     with pytest.raises(RuntimeError, match="architecture-specific"):
-        load_checkpoint(path, v43)
+        load_checkpoint(path, block_bank_router)
 
 
 def test_associative_scan_matches_sequential_output_and_gradient():
@@ -294,7 +294,7 @@ def test_fused_mps_scan_matches_reference_output_and_gradient():
         PureParallelGearV3LM(strict_config()),
         HybridParallelGearLM(hybrid_config()),
         BoundedTransformerLM(bounded_config()),
-        BlockHybridGearV4LM(v4_config()),
+        BlockHybridGearV4LM(block_additive_config()),
     ],
 )
 def test_full_and_streaming_logits_match(model):
@@ -349,7 +349,7 @@ def test_full_and_streaming_logits_match(model):
         PureParallelGearV3LM(strict_config()),
         HybridParallelGearLM(hybrid_config()),
         BoundedTransformerLM(bounded_config()),
-        BlockHybridGearV4LM(v4_config()),
+        BlockHybridGearV4LM(block_additive_config()),
     ],
 )
 def test_future_tokens_do_not_change_past_and_segments_reset(model):
@@ -418,8 +418,8 @@ def test_future_state_objective_reaches_every_bank_head():
     )
 
 
-def test_v4_future_state_objective_reaches_every_bank_head():
-    model = BlockHybridGearV4LM(v4_config())
+def test_block_additive_future_state_objective_reaches_every_bank_head():
+    model = BlockHybridGearV4LM(block_additive_config())
     tokens = torch.randint(0, 97, (2, 300))
     metrics = model.training_step(tokens)
     assert float(metrics["future_state"].detach()) > 0.0
@@ -432,8 +432,8 @@ def test_v4_future_state_objective_reaches_every_bank_head():
     )
 
 
-def test_v4_memory_changes_only_after_completed_blocks():
-    model = BlockHybridGearV4LM(v4_config()).eval()
+def test_block_memory_changes_only_after_completed_blocks():
+    model = BlockHybridGearV4LM(block_additive_config()).eval()
     tokens = torch.randint(0, 97, (1, 8))
     cache = None
     contexts = []
@@ -451,8 +451,8 @@ def test_v4_memory_changes_only_after_completed_blocks():
     assert torch.equal(contexts[3], contexts[4])
 
 
-def test_v42_selective_modulation_is_identity_without_context():
-    model = BlockHybridGearV4LM(v42_config()).eval()
+def test_block_selective_film_modulation_is_identity_without_context():
+    model = BlockHybridGearV4LM(block_selective_film_config()).eval()
     fusion = model.gear_memories[0].fusion
     assert fusion is not None
     hidden = torch.randn(2, 11, model.config.dim)
@@ -461,8 +461,8 @@ def test_v42_selective_modulation_is_identity_without_context():
     assert torch.allclose(gate, torch.full_like(gate, 0.5))
 
 
-def test_v42_selective_path_gets_language_model_gradients():
-    model = BlockHybridGearV4LM(v42_config())
+def test_block_selective_film_path_gets_language_model_gradients():
+    model = BlockHybridGearV4LM(block_selective_film_config())
     tokens = torch.randint(0, 97, (2, 32))
     loss = model.training_step(
         tokens,
@@ -477,8 +477,8 @@ def test_v42_selective_path_gets_language_model_gradients():
     ) > 0.0
 
 
-def test_v43_bank_router_is_identity_without_bank_memory():
-    model = BlockHybridGearV4LM(v43_config()).eval()
+def test_block_bank_router_is_identity_without_bank_memory():
+    model = BlockHybridGearV4LM(block_bank_router_config()).eval()
     router = model.gear_memories[0].bank_router
     assert router is not None
     hidden = torch.randn(2, 3, 4, model.config.dim)
@@ -493,8 +493,8 @@ def test_v43_bank_router_is_identity_without_bank_memory():
     assert torch.allclose(gate, torch.full_like(gate, 0.5))
 
 
-def test_v43_router_and_rotor_get_language_model_gradients():
-    model = BlockHybridGearV4LM(v43_config())
+def test_block_bank_router_and_rotor_get_language_model_gradients():
+    model = BlockHybridGearV4LM(block_bank_router_config())
     tokens = torch.randint(0, 97, (2, 32))
     loss = model.training_step(
         tokens,
@@ -568,8 +568,8 @@ def test_stateful_trainer_carries_and_detaches_two_chunks():
     )
 
 
-def test_v4_stateful_trainer_carries_aligned_block_cache():
-    model = BlockHybridGearV4LM(v4_config())
+def test_block_additive_stateful_trainer_carries_aligned_block_cache():
+    model = BlockHybridGearV4LM(block_additive_config())
     trainer = PureParallelGearV3Trainer(
         model,
         _LaneCorpus(),

@@ -34,7 +34,7 @@ documents into one recurrent lane.
 ## Engineering qualification
 
 Artifact:
-`outputs/pure_parallel_gear_v4_1/qualification_fp32_isolated.json`
+`outputs/bounded_hybrid_gear/block_additive_refined/qualification_fp32_isolated.json`
 
 V4 passed:
 
@@ -55,7 +55,7 @@ V4 uses block-rate updates.
 
 ## 200K-token screen
 
-Artifact: `outputs/pure_parallel_gear_v4/screen_200k/results.json`
+Artifact: `outputs/bounded_hybrid_gear/block_additive/screen_200k/results.json`
 
 | Model | Mean macro NLL | Mean train tokens/s |
 | --- | ---: | ---: |
@@ -69,7 +69,7 @@ throughput.
 ## 1M-token confirmation
 
 V4.1 artifact:
-`outputs/pure_parallel_gear_v4_1/confirmation_1m/results.json`
+`outputs/bounded_hybrid_gear/block_additive_refined/confirmation_1m/results.json`
 
 | Model | Mean macro NLL | Mean train tokens/s |
 | --- | ---: | ---: |

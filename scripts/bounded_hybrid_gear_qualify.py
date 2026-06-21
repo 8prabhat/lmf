@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Engineering and performance qualification for Gear V3 families."""
+"""Engineering and performance qualification for the Bounded Hybrid Gear family."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import torch
 
-from lmf.models.pure_parallel_gear_v3 import (
+from lmf.models.bounded_hybrid_gear import (
     BoundedTransformerConfig,
     BoundedTransformerLM,
     BlockHybridGearV4Config,
@@ -44,14 +44,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--context-len", type=int, default=4096)
     parser.add_argument("--generation-steps", type=int, default=32)
     parser.add_argument(
-        "--v4-fusion-mode",
+        "--block-fusion-mode",
         choices=("additive", "selective_film", "bank_router"),
         default="additive",
     )
-    parser.add_argument("--v4-fusion-rank", type=int, default=32)
-    parser.add_argument("--v4-ffn-dim", type=int, default=349)
-    parser.add_argument("--v4-attention-window", type=int, default=128)
-    parser.add_argument("--v4-block-tokens", type=int, default=128)
+    parser.add_argument("--block-fusion-rank", type=int, default=32)
+    parser.add_argument("--block-ffn-dim", type=int, default=349)
+    parser.add_argument("--block-attention-window", type=int, default=128)
+    parser.add_argument("--block-tokens", type=int, default=128)
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--seed", type=int, default=20262150)
     return parser.parse_args()
@@ -142,7 +142,7 @@ def model_set(vocab_size: int, args: argparse.Namespace):
             ffn_dim=381,
             heads=7,
             kv_heads=1,
-            attention_window=args.v4_attention_window,
+            attention_window=args.block_attention_window,
         )
     )
     transformer = CachedTransformerLM(
@@ -158,15 +158,15 @@ def model_set(vocab_size: int, args: argparse.Namespace):
             vocab_size=vocab_size,
             dim=112,
             layers=2,
-            ffn_dim=args.v4_ffn_dim,
+            ffn_dim=args.block_ffn_dim,
             heads=7,
             kv_heads=1,
-            attention_window=args.v4_attention_window,
+            attention_window=args.block_attention_window,
             cell_dim=12,
             bank_rank=12,
-            block_tokens=args.v4_block_tokens,
-            fusion_mode=args.v4_fusion_mode,
-            fusion_rank=args.v4_fusion_rank,
+            block_tokens=args.block_tokens,
+            fusion_mode=args.block_fusion_mode,
+            fusion_rank=args.block_fusion_rank,
         )
     )
     return {
@@ -174,7 +174,7 @@ def model_set(vocab_size: int, args: argparse.Namespace):
         "hybrid": hybrid,
         "bounded_transformer": bounded,
         "full_transformer": transformer,
-        "block_hybrid_v4": v4,
+        "block_hybrid_gear": v4,
     }
 
 
@@ -425,8 +425,8 @@ def main() -> None:
             / baseline
             >= 0.5
         ),
-        "v4_throughput_at_least_half_transformer": (
-            report["models"]["block_hybrid_v4"]["training"][
+        "block_hybrid_gear_throughput_at_least_half_transformer": (
+            report["models"]["block_hybrid_gear"]["training"][
                 "tokens_per_second"
             ]
             / baseline
@@ -442,8 +442,8 @@ def main() -> None:
             / baseline_incremental
             >= 1.5
         ),
-        "v4_generation_at_least_1_5x_transformer": (
-            report["models"]["block_hybrid_v4"]["incremental"][
+        "block_hybrid_gear_generation_at_least_1_5x_transformer": (
+            report["models"]["block_hybrid_gear"]["incremental"][
                 "tokens_per_second"
             ]
             / baseline_incremental
@@ -454,8 +454,8 @@ def main() -> None:
             / max(1, baseline_cache)
             <= 0.25
         ),
-        "v4_cache_at_most_quarter_transformer": (
-            report["models"]["block_hybrid_v4"]["incremental"][
+        "block_hybrid_gear_cache_at_most_quarter_transformer": (
+            report["models"]["block_hybrid_gear"]["incremental"][
                 "cache_bytes"
             ]
             / max(1, baseline_cache)
@@ -481,13 +481,13 @@ def main() -> None:
         "mixed_precision_logit_error",
         "parameter_match_within_half_percent",
     )
-    v4_checks = (
-        "v4_throughput_at_least_half_transformer",
-        "v4_generation_at_least_1_5x_transformer",
-        "v4_cache_at_most_quarter_transformer",
+    block_hybrid_gear_checks = (
+        "block_hybrid_gear_throughput_at_least_half_transformer",
+        "block_hybrid_gear_generation_at_least_1_5x_transformer",
+        "block_hybrid_gear_cache_at_most_quarter_transformer",
     )
-    report["v4_qualified"] = all(
-        report["checks"][name] for name in (*common_checks, *v4_checks)
+    report["block_hybrid_gear_qualified"] = all(
+        report["checks"][name] for name in (*common_checks, *block_hybrid_gear_checks)
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, indent=2, sort_keys=True))
@@ -495,7 +495,7 @@ def main() -> None:
         json.dumps(
             {
                 "qualified": report["qualified"],
-                "v4_qualified": report["v4_qualified"],
+                "block_hybrid_gear_qualified": report["block_hybrid_gear_qualified"],
                 **report["checks"],
             },
             indent=2,

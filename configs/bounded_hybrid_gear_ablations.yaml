@@ -1,4 +1,4 @@
-# Retrained causal ablations for the V3/hybrid program.
+# Retrained causal ablations for the Bounded Hybrid Gear program.
 # Every variant must be trained from a fresh seed-matched initialization.
 ablations:
   no_gear_branch:
@@ -42,11 +42,11 @@ ablations:
       name: pure_parallel_gear
       boundary_settling: false
       use_predictor_gear: false
-    interpretation: V2 flattened readout control without boundary settling.
+    interpretation: Pure Parallel Gear flattened readout control without boundary settling.
 
   old_boundary_settling:
     model:
       name: pure_parallel_gear
       boundary_settling: true
       use_predictor_gear: false
-    interpretation: V2 flattened readout plus sequential boundary settling.
+    interpretation: Pure Parallel Gear flattened readout plus sequential boundary settling.

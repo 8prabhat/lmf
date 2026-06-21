@@ -42,7 +42,7 @@ Implemented invariants:
 ## M4 Max engineering qualification
 
 Artifact:
-`outputs/pure_parallel_gear_v3/qualification_final_fp32.json`
+`outputs/bounded_hybrid_gear/strict_qualification/qualification_final_fp32.json`
 
 All models were parameter matched within 0.5% at approximately 776K parameters.
 Training used batch 2 by 512 on MPS FP32. Incremental generation was measured

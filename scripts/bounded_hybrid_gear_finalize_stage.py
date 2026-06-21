@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply paired quality gates to a completed V4 stage."""
+"""Apply paired quality gates to a completed Bounded Hybrid Gear stage."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--require-gear-value", action="store_true")
     parser.add_argument(
         "--candidate",
-        default="block_hybrid_v4",
+        default="bounded_hybrid_gear_block_additive",
     )
     return parser.parse_args()
 

@@ -223,16 +223,16 @@ def build_bounded_transformer_trainer(model, corpus, **kwargs):
     return PureParallelGearV3Trainer(model, corpus, **kwargs)
 
 
-@TRAINERS.register("block_hybrid_gear_v4")
-def build_block_hybrid_gear_v4_trainer(model, corpus, **kwargs):
+@TRAINERS.register("bounded_hybrid_gear_block_additive")
+def build_bounded_hybrid_gear_block_additive_trainer(model, corpus, **kwargs):
     return PureParallelGearV3Trainer(model, corpus, **kwargs)
 
 
-@TRAINERS.register("selective_hybrid_gear_v42")
-def build_selective_hybrid_gear_v42_trainer(model, corpus, **kwargs):
+@TRAINERS.register("bounded_hybrid_gear_block_selective_film")
+def build_bounded_hybrid_gear_block_selective_film_trainer(model, corpus, **kwargs):
     return PureParallelGearV3Trainer(model, corpus, **kwargs)
 
 
-@TRAINERS.register("gear_bank_router_v43")
-def build_gear_bank_router_v43_trainer(model, corpus, **kwargs):
+@TRAINERS.register("bounded_hybrid_gear_block_bank_router")
+def build_bounded_hybrid_gear_block_bank_router_trainer(model, corpus, **kwargs):
     return PureParallelGearV3Trainer(model, corpus, **kwargs)

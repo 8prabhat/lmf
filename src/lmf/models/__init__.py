@@ -8,23 +8,23 @@ code changes (Open/Closed).
 from __future__ import annotations
 
 from . import (  # noqa: F401  (import side-effect: registration)
+    bounded_hybrid_gear,
     gear_transformer,
     gru,
     native,
     opet,
     pure_parallel_gear,
-    pure_parallel_gear_v3,
     rhca,
     transformer,
 )
 
 __all__ = [
+    "bounded_hybrid_gear",
     "gear_transformer",
     "gru",
     "native",
     "opet",
     "pure_parallel_gear",
-    "pure_parallel_gear_v3",
     "rhca",
     "transformer",
 ]

@@ -1,9 +1,10 @@
-"""Block-rate Hybrid Gear V4.
+"""Block-rate Bounded Hybrid Gear memory.
 
-V4 uses the proven bounded-attention trunk at token rate and updates persistent
+Uses the proven bounded-attention trunk at token rate and updates persistent
 Gear memory once per fixed token block.  Tokens in a block can only consume
 memory produced by completed prior blocks, preserving causality while reducing
-scan length by ``block_tokens``.
+scan length by ``block_tokens``. Three switchable fusion strategies (additive,
+selective-FiLM, bank-router) are registered as separate model names.
 """
 
 from __future__ import annotations
@@ -1338,12 +1339,12 @@ class BlockHybridGearV4LM(nn.Module, _LanguageModelLossMixin):
         bank_router = self.config.fusion_mode == "bank_router"
         return {
             "name": (
-                "GearBankRouterV43"
+                "BoundedHybridGearBlockBankRouter"
                 if bank_router
                 else (
-                    "SelectiveHybridGearV42"
+                    "BoundedHybridGearBlockSelectiveFiLM"
                     if selective
-                    else "BlockHybridGearV4"
+                    else "BoundedHybridGearBlockAdditive"
                 )
             ),
             "version": 4.3 if bank_router else (4.2 if selective else 4.1),
@@ -1383,8 +1384,8 @@ class BlockHybridGearV4LM(nn.Module, _LanguageModelLossMixin):
         }
 
 
-@MODELS.register("block_hybrid_gear_v4")
-def build_block_hybrid_gear_v4(
+@MODELS.register("bounded_hybrid_gear_block_additive")
+def build_bounded_hybrid_gear_block_additive(
     model_cfg: dict,
     vocab_size: int | None = None,
 ):
@@ -1394,8 +1395,8 @@ def build_block_hybrid_gear_v4(
     return BlockHybridGearV4LM(BlockHybridGearV4Config(**values))
 
 
-@MODELS.register("selective_hybrid_gear_v42")
-def build_selective_hybrid_gear_v42(
+@MODELS.register("bounded_hybrid_gear_block_selective_film")
+def build_bounded_hybrid_gear_block_selective_film(
     model_cfg: dict,
     vocab_size: int | None = None,
 ):
@@ -1406,8 +1407,8 @@ def build_selective_hybrid_gear_v42(
     return BlockHybridGearV4LM(BlockHybridGearV4Config(**values))
 
 
-@MODELS.register("gear_bank_router_v43")
-def build_gear_bank_router_v43(
+@MODELS.register("bounded_hybrid_gear_block_bank_router")
+def build_bounded_hybrid_gear_block_bank_router(
     model_cfg: dict,
     vocab_size: int | None = None,
 ):

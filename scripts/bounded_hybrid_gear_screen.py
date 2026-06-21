@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Three-seed 200K-token screening for block-rate Hybrid Gear V4."""
+"""Three-seed 200K-token screening for block-rate Bounded Hybrid Gear variants."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ import torch.nn.functional as F
 
 from lmf.core.seeding import seed_everything
 from lmf.data import ContiguousDocumentLaneCorpus, PairedDocumentManifestCorpus
-from lmf.models.pure_parallel_gear_v3 import (
+from lmf.models.bounded_hybrid_gear import (
     BlockHybridGearV4Config,
     BlockHybridGearV4LM,
     BoundedTransformerConfig,
@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("outputs/pure_parallel_gear_v4/screen_200k"),
+        default=Path("outputs/bounded_hybrid_gear/screen_200k"),
     )
     parser.add_argument(
         "--tokenizer-name",
@@ -76,11 +76,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--candidate-name",
         choices=(
-            "block_hybrid_v4",
-            "selective_hybrid_v42",
-            "gear_bank_router_v43",
+            "bounded_hybrid_gear_block_additive",
+            "bounded_hybrid_gear_block_selective_film",
+            "bounded_hybrid_gear_block_bank_router",
         ),
-        default="block_hybrid_v4",
+        default="bounded_hybrid_gear_block_additive",
     )
     parser.add_argument("--v4-ffn-dim", type=int, default=349)
     parser.add_argument("--fusion-rank", type=int, default=32)
@@ -104,8 +104,8 @@ def json_hash(value) -> str:
 
 
 def model_configs(vocab_size: int, args: argparse.Namespace):
-    selective = args.candidate_name == "selective_hybrid_v42"
-    bank_router = args.candidate_name == "gear_bank_router_v43"
+    selective = args.candidate_name == "bounded_hybrid_gear_block_selective_film"
+    bank_router = args.candidate_name == "bounded_hybrid_gear_block_bank_router"
     return {
         args.candidate_name: BlockHybridGearV4Config(
             vocab_size=vocab_size,
@@ -146,9 +146,9 @@ def model_configs(vocab_size: int, args: argparse.Namespace):
 
 def build_model(name: str, config):
     if name in {
-        "block_hybrid_v4",
-        "selective_hybrid_v42",
-        "gear_bank_router_v43",
+        "bounded_hybrid_gear_block_additive",
+        "bounded_hybrid_gear_block_selective_film",
+        "bounded_hybrid_gear_block_bank_router",
     }:
         return BlockHybridGearV4LM(config)
     if name == "bounded_transformer":
@@ -169,9 +169,9 @@ def build_trainer(name, model, corpus, args):
         "total_steps": 10_000,
     }
     if name in {
-        "block_hybrid_v4",
-        "selective_hybrid_v42",
-        "gear_bank_router_v43",
+        "bounded_hybrid_gear_block_additive",
+        "bounded_hybrid_gear_block_selective_film",
+        "bounded_hybrid_gear_block_bank_router",
         "bounded_transformer",
     }:
         return PureParallelGearV3Trainer(
@@ -273,7 +273,7 @@ def main() -> None:
     )
     configs = model_configs(probe_corpus.vocab_size, args)
     report = {
-        "stage": "block_hybrid_gear_v4_200k_screen",
+        "stage": "bounded_hybrid_gear_200k_screen",
         "environment": {
             "torch": torch.__version__,
             "platform": platform.platform(),

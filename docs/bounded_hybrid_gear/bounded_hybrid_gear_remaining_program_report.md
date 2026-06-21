@@ -57,8 +57,8 @@ The Gear-removal test failed.
 
 Artifacts:
 
-- `outputs/selective_hybrid_gear_v42_dense/confirmation_1m/results.json`
-- `outputs/selective_hybrid_gear_v42_dense/confirmation_1m/gate.json`
+- `outputs/bounded_hybrid_gear/block_selective_film_dense/confirmation_1m/results.json`
+- `outputs/bounded_hybrid_gear/block_selective_film_dense/confirmation_1m/gate.json`
 
 ## V4.3 fixed Gear-bank retrieval
 
@@ -72,7 +72,7 @@ The architecture was rejected before quality training:
 - the 50% engineering gate failed.
 
 Artifact:
-`outputs/gear_bank_router_v43/qualification_fp32_rank8.json`
+`outputs/bounded_hybrid_gear/block_bank_router/qualification_fp32_rank8.json`
 
 ## V4.4 64-token local horizon
 
@@ -99,8 +99,8 @@ again does not measurably hurt.
 
 Artifacts:
 
-- `outputs/selective_hybrid_gear_v44_w64/confirmation_1m/results.json`
-- `outputs/selective_hybrid_gear_v44_w64/confirmation_1m/gate.json`
+- `outputs/bounded_hybrid_gear/block_selective_film_w64/confirmation_1m/results.json`
+- `outputs/bounded_hybrid_gear/block_selective_film_w64/confirmation_1m/gate.json`
 
 ## Final conclusion
 

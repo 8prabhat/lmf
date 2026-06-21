@@ -1,4 +1,5 @@
-"""Pure Parallel Gear V3 public API."""
+"""Bounded Hybrid Gear public API: bounded local-attention trunk + scan-based
+Gear memory, with token-rate and block-rate (switchable fusion) variants."""
 
 from .attention import BoundedLocalAttention, LocalKVCache
 from .model import (
@@ -31,14 +32,14 @@ from .trainer import (
     build_hybrid_parallel_gear_trainer,
     build_pure_parallel_gear_v3_trainer,
 )
-from .v4 import (
+from .block_memory import (
     BlockGearMemoryCache,
     BlockHybridGearV4Cache,
     BlockHybridGearV4Config,
     BlockHybridGearV4LM,
-    build_block_hybrid_gear_v4,
-    build_selective_hybrid_gear_v42,
-    build_gear_bank_router_v43,
+    build_bounded_hybrid_gear_block_additive,
+    build_bounded_hybrid_gear_block_selective_film,
+    build_bounded_hybrid_gear_block_bank_router,
 )
 
 __all__ = [
@@ -61,9 +62,9 @@ __all__ = [
     "PureParallelGearV3LM",
     "PureParallelGearV3Trainer",
     "build_bounded_transformer",
-    "build_block_hybrid_gear_v4",
-    "build_selective_hybrid_gear_v42",
-    "build_gear_bank_router_v43",
+    "build_bounded_hybrid_gear_block_additive",
+    "build_bounded_hybrid_gear_block_selective_film",
+    "build_bounded_hybrid_gear_block_bank_router",
     "build_hybrid_parallel_gear",
     "build_pure_parallel_gear_v3",
     "build_bounded_transformer_trainer",
