@@ -85,9 +85,9 @@ closest.
 
 Pure Parallel Gear’s architecture contract, mathematical mechanism, data
 preparation, gated scale workflow, and honest stopping rules are documented in
-[`docs/pure_parallel_gear.md`](docs/pure_parallel_gear.md).
+[`docs/pure_parallel_gear/pure_parallel_gear.md`](docs/pure_parallel_gear/pure_parallel_gear.md).
 Verified implementation status and the still-unrun compute stages are recorded
-in [`docs/pure_parallel_gear_implementation_report.md`](docs/pure_parallel_gear_implementation_report.md).
+in [`docs/pure_parallel_gear/pure_parallel_gear_implementation_report.md`](docs/pure_parallel_gear/pure_parallel_gear_implementation_report.md).
 
 The canonical family deliberately contains no attention, Q/K/V projections,
 token-history retrieval, routing over previous tokens, or KV cache. SentencePiece

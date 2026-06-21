@@ -6,7 +6,7 @@
 > independent gear mechanism. Its results must not be cited as evidence for a
 > pure parallel-gear language model. The corrected architecture is
 > The independent canonical architecture is documented in
-> `docs/pure_parallel_gear.md`.
+> `docs/pure_parallel_gear/pure_parallel_gear.md`.
 
 Status: retained only as a historical hybrid experiment.
 
