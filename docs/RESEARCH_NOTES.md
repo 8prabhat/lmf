@@ -11,6 +11,32 @@ stated otherwise: single seed, 200-1,000 training steps, a handful of
 validation batches, CPU/MPS smoke hardware. These are directional pilots for
 choosing the next iteration, not final benchmarks.
 
+## 0. Canonical Directory Map
+
+Every model family's source, config, docs, tests, and (gitignored) results
+live under the same name. This table is the index; see Section 2 for the full
+registry-name-to-description mapping.
+
+| Family folder | Registry key(s) | `src/lmf/models/` | Configs | Docs | Tests |
+| --- | --- | --- | --- | --- | --- |
+| transformer | `transformer`, `mght` | `transformer/` | `transformer_baseline.yaml` | `docs/transformer/mght_variant.md` | `test_transformer.py` |
+| gru | `gru_lm` | `gru/` | -- | -- | (benchmark-only) |
+| opet | `opet` | `opet/` | `opet_baseline.yaml`, `ablations/opet_smoke.yaml` | -- | `test_opet.py` |
+| rhca | `rhca` | `rhca/` | `rhca.yaml` | -- | `test_rhca_model.py`, `test_rhca_recall.py`, `test_carried_state.py`, `test_codebook.py`, `test_dynamics_rope.py` |
+| gear_transformer | `gear_transformer`/`mlgt`, `gear_only`, `simplified_gear_transformer` | `gear_transformer/` | `gear_transformer.yaml`, `ablations/gear_transformer_*.yaml` | `docs/gear_transformer/` (+ `archive/` for superseded V2/retracted designs) | `test_gear_transformer.py` |
+| pure_parallel_gear | `pure_parallel_gear` | `pure_parallel_gear/` | `pure_parallel_gear.yaml` | `docs/pure_parallel_gear/` (+ `archive/` for a dated review) | `test_pure_parallel_gear.py` |
+| bounded_hybrid_gear | `pure_parallel_gear_v3`, `hybrid_parallel_gear`, `bounded_transformer`, `bounded_hybrid_gear_block_additive`, `bounded_hybrid_gear_block_selective_film`, `bounded_hybrid_gear_block_bank_router` | `bounded_hybrid_gear/` | `bounded_hybrid_gear*.yaml` | `docs/bounded_hybrid_gear/` | `test_bounded_hybrid_gear.py` |
+| mecm | `mecm` | `mecm/` (+ shared scaffolding in `_shared/`) | `multigear_baseline_models.yaml`, `ablations/mecm_*.yaml` | `docs/multigear_baseline_models/three_architectures_comparison.md` | `test_mecm.py` |
+| mcpm | `mcpm` | `mcpm/` (+ shared scaffolding in `_shared/`) | `multigear_baseline_models.yaml`, `ablations/mcpm_*.yaml` | `docs/multigear_baseline_models/three_architectures_comparison.md` | `test_mcpm.py` |
+| mgcf | `mgcf` | `mgcf/` | `multigear_baseline_models.yaml` | `docs/multigear_baseline_models/three_architectures_comparison.md` (frontier follow-up section) | `test_mgcf.py` |
+| mrwt | `mrwt` | `mrwt/` | `multigear_baseline_models.yaml`, `ablations/mrwt_*.yaml` | `docs/multigear_baseline_models/three_architectures_comparison.md` | `test_mrwt.py` |
+| (cross-cutting) | -- | `_shared/` (infra, not registrable) | `multigear_generative_comparison.yaml` (mecm/mght/mgcf transformer comparison) | `docs/tokenizer/` (tokenizer-only docs) | `test_multigear_baseline_models.py` (registry + build-from-config checks) |
+
+No model or folder is named generically "native" -- the four MultiGear
+baseline architectures (mecm/mcpm/mgcf/mrwt) are independently named and
+registered; only the cross-family scaffolding they share lives in the
+leading-underscore `_shared/` infra namespace.
+
 ## 1. TL;DR / Current Recommendation
 
 - **Tokenizer**: SentencePiece BPE remains the best default for generative
@@ -18,7 +44,7 @@ choosing the next iteration, not final benchmarks.
   BPE and is competitive with SentencePiece when paired with
   merge-compositional initialization + hierarchical output, but its pure
   Python implementation is far slower to train/encode.
-- **Model**: among MultiGear-native architectures, **MGHT**
+- **Model**: among MultiGear baseline architectures, **MGHT**
   (MultiGear Hierarchical Transformer) is the strongest pilot result so far,
   followed by **MGCF** (non-Transformer frontier baseline). Neither yet beats
   the matched Transformer + SentencePiece baseline.
@@ -39,11 +65,18 @@ choosing the next iteration, not final benchmarks.
 | `opet` | OPET | `transformer` baseline with phase-enriched token embeddings + coherence auxiliary loss | exploratory |
 | `gear_transformer` (alias `mlgt`) | Gear Transformer | full Transformer trunk + write/update/cross-gear-coupling/read gear side-channel | exploratory, beaten by param-matched Transformer |
 | `gear_only` | Gear Transformer | same gear mechanism with causal self-attention removed | exploratory, best on repeated-corpus smoke test |
-| `mght` | MultiGear-native | Transformer trunk + MultiGear input-gear embedding + hierarchical (`bias`/`factorized`) gear-aware output | best MultiGear pilot so far |
-| `mecm` | MultiGear-native | non-Transformer causal long-convolution trunk + zero-gated mesh residual | runnable first-pass baseline |
-| `mcpm` | MultiGear-native | non-Transformer surface model + zero-gated deterministic execution-trace adapter | runnable first-pass baseline |
-| `mgcf` | MultiGear-native | non-Transformer, non-Mamba; routed dilated causal branches + learned long-filter memory + gear-aware output | strongest non-Transformer pilot |
-| `mrwt` | MultiGear-native | Transformer anchor + zero-gated causal atlas/workbench residual adapters + exact fallback | strongest MultiGear-native pilot overall (still trails SentencePiece) |
+| `pure_parallel_gear` | Pure Parallel Gear | attention-free LM, fast-weight associative memory, constant-size generation cache | canonical first generation |
+| `pure_parallel_gear_v3` | Bounded Hybrid Gear | strict constant-state rotor model, no attention (ablation control within the family) | exploratory |
+| `hybrid_parallel_gear` | Bounded Hybrid Gear | `pure_parallel_gear_v3` plus fixed-window grouped-query local attention | exploratory |
+| `bounded_transformer` | Bounded Hybrid Gear | bounded local-attention trunk with no Gear memory (ablation control) | exploratory |
+| `bounded_hybrid_gear_block_additive` | Bounded Hybrid Gear | bounded-attention trunk + block-rate Gear memory, additive fusion | exploratory |
+| `bounded_hybrid_gear_block_selective_film` | Bounded Hybrid Gear | same trunk, token/channel-selective FiLM fusion | exploratory |
+| `bounded_hybrid_gear_block_bank_router` | Bounded Hybrid Gear | same trunk, learned bank-slot router fusion | exploratory |
+| `mght` | MultiGear baseline | Transformer trunk + MultiGear input-gear embedding + hierarchical (`bias`/`factorized`) gear-aware output | best MultiGear pilot so far |
+| `mecm` | MultiGear baseline | non-Transformer causal long-convolution trunk + zero-gated mesh residual | runnable first-pass baseline |
+| `mcpm` | MultiGear baseline | non-Transformer surface model + zero-gated deterministic execution-trace adapter | runnable first-pass baseline |
+| `mgcf` | MultiGear baseline | non-Transformer, non-Mamba; routed dilated causal branches + learned long-filter memory + gear-aware output | strongest non-Transformer pilot |
+| `mrwt` | MultiGear baseline | Transformer anchor + zero-gated causal atlas/workbench residual adapters + exact fallback | strongest MultiGear baseline pilot overall (still trails SentencePiece) |
 
 ## 3. Gear Transformer Findings (attention + gear residual)
 
@@ -240,7 +273,7 @@ model (compositional init + hierarchical output), but it has not yet beaten
 SentencePiece BPE as the default tokenizer, and its current implementation is
 not production-speed.
 
-## 5. MultiGear-Native Architectures: MECM, MCPM, MRWT (+ MGCF)
+## 5. MultiGear Baseline Architectures: MECM, MCPM, MRWT (+ MGCF)
 
 Three architectures were designed with different objectives, replacing
 earlier rejected designs (MBOC for MECM, MCPGM for MCPM, MHDT for MRWT -- all
@@ -409,7 +442,7 @@ primary generative architecture until a new non-attention trunk beats MGHT.**
 | **MRWT** | MultiGear | 3.39M | **3.5121** | 30,436 |
 | MRWT anchor-only | MultiGear | 1.93M | 3.5271 | 53,045 |
 
-MRWT is the strongest MultiGear-native architecture tested, still trailing
+MRWT is the strongest MultiGear baseline architecture tested, still trailing
 SentencePiece. Removing the full research stack (minimal MCPM / anchor-only
 MRWT) is not quality-safe in either case. Recommendation: keep full MCPM with
 `draft_aux_weight: 0.0`; keep full MRWT for MultiGear pilots.
@@ -494,7 +527,7 @@ bits/text-byte.
    the MPJA generator.
 6. Phase 1/2/3 of the MECM/MRWT/MCPM development order (Section 5) are still mostly
    unstarted beyond the runnable first-pass baselines in
-   `src/lmf/models/native/`.
+   `src/lmf/models/mecm/`, `mcpm/`, `mrwt/`, and `mgcf/`.
 
 ## 9. Where the Raw Data Lives
 
@@ -502,13 +535,13 @@ bits/text-byte.
   generation-360, compositional-init, runtime).
 - `results/ablations/*/summary.md` -> deleted; regenerate via `lmf ablate`
   using the configs in `configs/ablations/`.
-- `results/generative_mecm_iteration/*.json` -- MGCF tokenizer diagnostics and
-  prediction-aware tokenizer results.
+- `results/multigear_generative_comparison/*.json` -- MGCF tokenizer diagnostics
+  and prediction-aware tokenizer results.
 - `scripts/benchmark_*.py` -- reproduction scripts for every tokenizer
   benchmark in Section 4.
 - `configs/multigear_recommended.yaml` -- the evidence-backed MultiGear model
   integration (merge-compositional init + hierarchical output only).
 - `configs/multigear_enhanced.yaml` -- full opt-in feature stack, kept only to
   reproduce the full-stack ablation.
-- `configs/generative_mecm_iteration.yaml` and `configs/multigear_native_models.yaml`
+- `configs/multigear_generative_comparison.yaml` and `configs/multigear_baseline_models.yaml`
  -- blocks for every pilot in Section 7.
