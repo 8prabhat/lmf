@@ -11,7 +11,9 @@ from pathlib import Path
 
 import torch
 
+from lmf.core.io import atomic_write_json as write_json
 from lmf.data import PairedDocumentManifestCorpus
+from lmf.diagnostics import parameter_count as count_parameters
 from lmf.models.transformer import CachedTransformerLM, TransformerConfig
 
 try:
@@ -20,10 +22,8 @@ try:
         _matched_gru,
         _trainer,
         build_model,
-        count_parameters,
         evaluate_manifest,
         throughput,
-        write_json,
     )
 except ModuleNotFoundError:
     from benchmark_pure_parallel_gear import (
@@ -31,10 +31,8 @@ except ModuleNotFoundError:
         _matched_gru,
         _trainer,
         build_model,
-        count_parameters,
         evaluate_manifest,
         throughput,
-        write_json,
     )
 
 

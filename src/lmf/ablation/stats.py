@@ -8,6 +8,7 @@ multi-seed ablation sweeps), documented as such below.
 from __future__ import annotations
 
 import math
+import statistics
 
 import numpy as np
 
@@ -85,6 +86,78 @@ def bootstrap_ci(values: list[float], n_resamples: int = 2000, ci: float = 0.95,
     alpha = (1.0 - ci) / 2.0
     lo, hi = np.quantile(resampled_means, [alpha, 1.0 - alpha])
     return (float(lo), float(hi))
+
+
+def percentile(values: list[float], fraction: float) -> float:
+    """Linear-interpolated percentile of ``values`` at ``fraction`` in ``[0, 1]``."""
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return float("nan")
+    position = float(fraction) * (len(ordered) - 1)
+    left = math.floor(position)
+    right = math.ceil(position)
+    if left == right:
+        return ordered[left]
+    return ordered[left] + (ordered[right] - ordered[left]) * (position - left)
+
+
+def paired_bootstrap_interval(
+    differences: list[float],
+    *,
+    seed: int,
+    samples: int = 10_000,
+    confidence: float = 0.95,
+) -> dict[str, float]:
+    """Bootstrap CI of the mean of paired ``differences``, in the dict shape used
+    by qualification/gate reports. Thin wrapper around ``bootstrap_ci``."""
+    if not differences:
+        raise ValueError("bootstrap requires at least one paired difference")
+    lower, upper = bootstrap_ci(differences, n_resamples=samples, ci=confidence, seed=seed)
+    return {
+        "mean": float(np.mean(differences)),
+        "lower": lower,
+        "upper": upper,
+        "samples": samples,
+    }
+
+
+def holm_adjust(p_values: dict[str, float]) -> dict[str, float]:
+    """Holm-Bonferroni step-down adjustment for a family of named p-values."""
+    ordered = sorted(p_values.items(), key=lambda item: item[1])
+    count = len(ordered)
+    adjusted: dict[str, float] = {}
+    running = 0.0
+    for rank, (name, value) in enumerate(ordered):
+        running = max(running, min(1.0, (count - rank) * float(value)))
+        adjusted[name] = running
+    return adjusted
+
+
+def sign_test_paired(values: list[float]) -> float:
+    """Two-sided exact sign test p-value for a list of paired differences."""
+    positive = sum(value > 0 for value in values)
+    negative = sum(value < 0 for value in values)
+    count = positive + negative
+    if count == 0:
+        return 1.0
+    tail = min(positive, negative)
+    probability = sum(math.comb(count, index) for index in range(tail + 1)) / 2**count
+    return min(1.0, 2.0 * probability)
+
+
+def analytic_confidence_interval(values: list[float]) -> dict[str, float]:
+    """Analytic (Student-t for n=3, else normal-approximation) confidence
+    interval of the mean of a small sample. Prefer ``bootstrap_ci`` /
+    ``paired_bootstrap_interval`` when the sample is large enough to resample;
+    this is for the very-small-n (e.g. 3-seed) regime where a closed-form
+    interval is the established convention in this repo's gate reports."""
+    mean = statistics.fmean(values)
+    if len(values) < 2:
+        return {"mean": mean, "lower": mean, "upper": mean}
+    standard_error = statistics.stdev(values) / math.sqrt(len(values))
+    critical = 4.303 if len(values) == 3 else 1.96  # Student-t df=2 vs normal approx.
+    radius = critical * standard_error
+    return {"mean": mean, "lower": mean - radius, "upper": mean + radius}
 
 
 def compare_to_baseline(cell_values: list[float], baseline_values: list[float]) -> dict:

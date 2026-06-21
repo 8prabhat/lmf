@@ -4,7 +4,20 @@ from __future__ import annotations
 
 import math
 
-from lmf.ablation.stats import bootstrap_ci, cohens_d, compare_to_baseline, mean_std_stderr, welch_t_test
+import pytest
+
+from lmf.ablation.stats import (
+    analytic_confidence_interval,
+    bootstrap_ci,
+    cohens_d,
+    compare_to_baseline,
+    holm_adjust,
+    mean_std_stderr,
+    paired_bootstrap_interval,
+    percentile,
+    sign_test_paired,
+    welch_t_test,
+)
 
 
 def test_mean_std_stderr():
@@ -61,3 +74,51 @@ def test_compare_to_baseline_structure():
     assert "delta_bootstrap_ci" in out
     assert out["cell"]["n"] == 3
     assert out["baseline"]["n"] == 3
+
+
+def test_percentile_matches_known_quantiles():
+    values = [1.0, 2.0, 3.0, 4.0, 5.0]
+    assert math.isclose(percentile(values, 0.0), 1.0)
+    assert math.isclose(percentile(values, 1.0), 5.0)
+    assert math.isclose(percentile(values, 0.5), 3.0)
+
+
+def test_percentile_empty_is_nan():
+    assert math.isnan(percentile([], 0.5))
+
+
+def test_paired_bootstrap_interval_brackets_mean():
+    differences = [1.0, 1.2, 0.8, 1.1, 0.9]
+    out = paired_bootstrap_interval(differences, seed=0, samples=500)
+    assert out["lower"] <= out["mean"] <= out["upper"]
+    assert out["samples"] == 500
+
+
+def test_paired_bootstrap_interval_requires_values():
+    with pytest.raises(ValueError):
+        paired_bootstrap_interval([], seed=0)
+
+
+def test_holm_adjust_orders_by_significance():
+    adjusted = holm_adjust({"a": 0.01, "b": 0.04, "c": 0.5})
+    # Holm-adjusted p-values are monotonically non-decreasing in rank order.
+    ordered = sorted(adjusted.items(), key=lambda item: {"a": 0.01, "b": 0.04, "c": 0.5}[item[0]])
+    assert ordered[0][1] <= ordered[1][1] <= ordered[2][1]
+
+
+def test_sign_test_paired_all_positive_is_significant():
+    assert sign_test_paired([1.0, 2.0, 3.0, 4.0, 5.0]) < 0.1
+
+
+def test_sign_test_paired_balanced_is_not_significant():
+    assert math.isclose(sign_test_paired([1.0, -1.0, 2.0, -2.0]), 1.0)
+
+
+def test_analytic_confidence_interval_single_value():
+    out = analytic_confidence_interval([5.0])
+    assert out == {"mean": 5.0, "lower": 5.0, "upper": 5.0}
+
+
+def test_analytic_confidence_interval_three_seeds_uses_t_critical():
+    out = analytic_confidence_interval([1.0, 2.0, 3.0])
+    assert out["lower"] < out["mean"] < out["upper"]

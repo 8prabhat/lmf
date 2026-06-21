@@ -5,16 +5,17 @@ from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
-import hashlib
 import json
 import platform
 import statistics
-import subprocess
 import time
 from pathlib import Path
 
 import torch
 
+from lmf.core.device import sync
+from lmf.core.hashing import git_tree_sha256, json_sha256
+from lmf.diagnostics import cache_bytes
 from lmf.models.bounded_hybrid_gear import (
     BoundedTransformerConfig,
     BoundedTransformerLM,
@@ -28,10 +29,6 @@ from lmf.models.bounded_hybrid_gear import (
     complex_mul,
 )
 from lmf.models.transformer import CachedTransformerLM, TransformerConfig
-try:
-    from scripts.pure_parallel_gear_common import cache_bytes
-except ModuleNotFoundError:
-    from pure_parallel_gear_common import cache_bytes
 
 
 def parse_args() -> argparse.Namespace:
@@ -55,13 +52,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--repeats", type=int, default=5)
     parser.add_argument("--seed", type=int, default=20262150)
     return parser.parse_args()
-
-
-def sync(device: torch.device) -> None:
-    if device.type == "mps":
-        torch.mps.synchronize()
-    elif device.type == "cuda":
-        torch.cuda.synchronize()
 
 
 def sequential_scan(multiplier, bias, initial):
@@ -221,39 +211,6 @@ def streaming_error(model, tokens, device, dtype):
     }
 
 
-def code_hash() -> str:
-    result = subprocess.run(
-        [
-            "git",
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "--",
-            "src",
-            "scripts",
-            "configs",
-            "tests",
-            "pyproject.toml",
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    digest = hashlib.sha256()
-    for name in sorted(result.stdout.splitlines()):
-        path = Path(name)
-        if path.is_file():
-            digest.update(name.encode())
-            digest.update(path.read_bytes())
-    return digest.hexdigest()
-
-
-def manifest_hash(manifest: dict) -> str:
-    encoded = json.dumps(manifest, sort_keys=True, default=str).encode()
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def throughput(model, tokens, device, dtype, repeats):
     model.train()
     with precision_context(device, dtype):
@@ -343,7 +300,7 @@ def main() -> None:
             "precision": args.precision,
             "python": platform.python_version(),
             "platform": platform.platform(),
-            "code_hash": code_hash(),
+            "code_hash": git_tree_sha256(),
             "seed": args.seed,
             "checkpoint_hash": None,
             "checkpoint_hash_reason": "engineering qualification uses fresh weights",
@@ -358,7 +315,7 @@ def main() -> None:
         report["models"][name] = {
             "parameters": sum(parameter.numel() for parameter in model.parameters()),
             "manifest": manifest,
-            "manifest_hash": manifest_hash(manifest),
+            "manifest_hash": json_sha256(manifest),
             "instantiated_config": model.config.to_dict(),
             "streaming": streaming_error(
                 model, short_tokens, device, dtype

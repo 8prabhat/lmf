@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+
+from ..core.io import atomic_write_json
 
 
 @dataclass
@@ -35,10 +36,7 @@ def result_path(results_dir: str | Path, cell_id: str, seed: int) -> Path:
 def write_result(results_dir: str | Path, result: CellResult) -> Path:
     """Atomically write ``result`` to its JSON path (write to ``.tmp`` then replace)."""
     path = result_path(results_dir, result.cell_id, result.seed)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(asdict(result), indent=2, default=str))
-    os.replace(tmp, path)
+    atomic_write_json(path, asdict(result))
     return path
 
 

@@ -32,7 +32,7 @@ from scripts.benchmark_pure_parallel_gear import (
     gear_parameter_count,
     throughput,
 )
-from scripts.pure_parallel_gear_common import cache_bytes
+from lmf.diagnostics import cache_bytes
 
 
 def config(**overrides) -> PureParallelGearConfig:

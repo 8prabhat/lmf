@@ -22,8 +22,8 @@ from lmf.models.bounded_hybrid_gear import (
     complex_mul,
     mps_affine_scan,
 )
+from lmf.diagnostics import cache_bytes
 from lmf.training.checkpoints import load_checkpoint, save_checkpoint
-from scripts.pure_parallel_gear_common import cache_bytes
 
 
 def strict_config(**overrides):

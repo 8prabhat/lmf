@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import math
 import statistics
 from pathlib import Path
+
+from lmf.ablation.stats import analytic_confidence_interval as paired_interval
 
 
 def parse_args() -> argparse.Namespace:
@@ -21,20 +22,6 @@ def parse_args() -> argparse.Namespace:
         default="bounded_hybrid_gear_block_additive",
     )
     return parser.parse_args()
-
-
-def paired_interval(values: list[float]) -> dict[str, float]:
-    mean = statistics.fmean(values)
-    if len(values) < 2:
-        return {"mean": mean, "lower": mean, "upper": mean}
-    standard_error = statistics.stdev(values) / math.sqrt(len(values))
-    critical = 4.303 if len(values) == 3 else 1.96
-    radius = critical * standard_error
-    return {
-        "mean": mean,
-        "lower": mean - radius,
-        "upper": mean + radius,
-    }
 
 
 def indexed_runs(report: dict, name: str) -> dict[int, dict]:

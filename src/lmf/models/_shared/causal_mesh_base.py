@@ -20,6 +20,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from ...diagnostics.profiler import parameter_count
 from ..transformer.model import RMSNorm
 
 
@@ -512,10 +513,6 @@ def lm_cross_entropy(
 
 def init_embedding(module: nn.Embedding) -> None:
     nn.init.normal_(module.weight, mean=0.0, std=0.02)
-
-
-def parameter_count(module: nn.Module) -> int:
-    return sum(parameter.numel() for parameter in module.parameters())
 
 
 def positional_ids(length: int, max_seq_len: int, device: torch.device) -> torch.Tensor:

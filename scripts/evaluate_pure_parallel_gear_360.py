@@ -15,23 +15,20 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
+from lmf.ablation.stats import percentile
 from lmf.data import EduCombinedCorpus, SentenceBoundaryDetector
+from lmf.diagnostics import cache_bytes
 from lmf.evaluation import PredictiveTaskCorpus
 from lmf.models.pure_parallel_gear import PureParallelGearLM
 from lmf.models.rhca.state import SamplingConfig
+from lmf.research_utils import load_model
 try:
     from scripts.benchmark_pure_parallel_gear import (
         efficiency_samples,
         evaluate_manifest,
     )
-    from scripts.pure_parallel_gear_common import (
-        cache_bytes,
-        load_model,
-        percentile,
-    )
 except ModuleNotFoundError:
     from benchmark_pure_parallel_gear import efficiency_samples, evaluate_manifest
-    from pure_parallel_gear_common import cache_bytes, load_model, percentile
 
 
 DOMAINS = (

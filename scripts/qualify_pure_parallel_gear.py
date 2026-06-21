@@ -19,10 +19,7 @@ from lmf.models.pure_parallel_gear import (
     PureParallelGearTrainer,
 )
 from lmf.models.pure_parallel_gear.model import _rotate
-try:
-    from scripts.pure_parallel_gear_common import cache_bytes
-except ModuleNotFoundError:
-    from pure_parallel_gear_common import cache_bytes
+from lmf.diagnostics import cache_bytes
 
 
 def parse_args() -> argparse.Namespace:

@@ -17,6 +17,25 @@ import torch
 from torch import nn
 
 
+def parameter_count(module: nn.Module) -> int:
+    """Total element count across every parameter in ``module``."""
+    return sum(parameter.numel() for parameter in module.parameters())
+
+
+def cache_bytes(value: Any) -> int:
+    """Recursively measure the tensor memory footprint of a generation cache
+    (or any nested dict/list/dataclass-like object holding tensors)."""
+    if torch.is_tensor(value):
+        return value.numel() * value.element_size()
+    if hasattr(value, "__dict__"):
+        return sum(cache_bytes(item) for item in vars(value).values())
+    if isinstance(value, dict):
+        return sum(cache_bytes(item) for item in value.values())
+    if isinstance(value, (tuple, list)):
+        return sum(cache_bytes(item) for item in value)
+    return 0
+
+
 def _parameterized_leaves(model: nn.Module) -> list[tuple[str, nn.Module]]:
     return [(name, m) for name, m in model.named_modules()
             if name and any(True for _ in m.parameters(recurse=False))]

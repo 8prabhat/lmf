@@ -9,7 +9,9 @@ import statistics
 from dataclasses import replace
 from pathlib import Path
 
+from lmf.core.io import atomic_write_json as write_json
 from lmf.data import PairedDocumentManifestCorpus
+from lmf.diagnostics import parameter_count as count_parameters
 from lmf.models.pure_parallel_gear import (
     PureParallelGearConfig,
     PureParallelGearLM,
@@ -19,19 +21,15 @@ try:
     from scripts.benchmark_pure_parallel_gear import (
         STAGES,
         configs,
-        count_parameters,
         gear_parameter_count,
         train_run,
-        write_json,
     )
 except ModuleNotFoundError:
     from benchmark_pure_parallel_gear import (
         STAGES,
         configs,
-        count_parameters,
         gear_parameter_count,
         train_run,
-        write_json,
     )
 
 

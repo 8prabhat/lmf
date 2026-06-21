@@ -18,12 +18,17 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
+from lmf.ablation.stats import percentile
+from lmf.core.device import sync
+from lmf.core.hashing import file_sha256
+from lmf.core.io import atomic_write_json as write_json
 from lmf.core.seeding import (
     capture_rng_state,
     restore_rng_state,
     seed_everything,
 )
 from lmf.data import PairedDocumentManifestCorpus, tokenizer_fingerprint
+from lmf.diagnostics import cache_bytes, parameter_count as count_parameters
 from lmf.models.gru import GRULM, GRULMConfig
 from lmf.models.pure_parallel_gear import (
     PureParallelGearConfig,
@@ -66,10 +71,6 @@ STAGES = {
         "transformer": (576, 8, 8),
     },
 }
-
-
-def count_parameters(model: torch.nn.Module) -> int:
-    return sum(parameter.numel() for parameter in model.parameters())
 
 
 def _configured_parameter_count(model_type, config) -> int:
@@ -487,40 +488,6 @@ def evaluate_manifest(
     }
 
 
-def cache_bytes(value: Any) -> int:
-    if torch.is_tensor(value):
-        return value.numel() * value.element_size()
-    if hasattr(value, "__dict__"):
-        return sum(cache_bytes(item) for item in vars(value).values())
-    if isinstance(value, dict):
-        return sum(cache_bytes(item) for item in value.values())
-    if isinstance(value, (tuple, list)):
-        return sum(cache_bytes(item) for item in value)
-    return 0
-
-
-def percentile(values: list[float], fraction: float) -> float:
-    ordered = sorted(float(value) for value in values)
-    if not ordered:
-        return float("nan")
-    position = float(fraction) * (len(ordered) - 1)
-    left = math.floor(position)
-    right = math.ceil(position)
-    if left == right:
-        return ordered[left]
-    return ordered[left] + (ordered[right] - ordered[left]) * (
-        position - left
-    )
-
-
-def _synchronize(device: str | torch.device) -> None:
-    kind = torch.device(device).type
-    if kind == "mps":
-        torch.mps.synchronize()
-    elif kind == "cuda":
-        torch.cuda.synchronize()
-
-
 def _cached_forward(model, tokens, cache=None, *, use_cache=True, boundary=None):
     if isinstance(model, CachedTransformerLM):
         return model(tokens, caches=cache, use_cache=use_cache)
@@ -585,24 +552,24 @@ def efficiency_samples(
             model, token, cache, boundary=boundary
         )
         token = logits[:, -1].argmax(dim=-1, keepdim=True)
-    _synchronize(device)
+    sync(device)
 
     prefill_times: list[float] = []
     incremental_times: list[float] = []
     measured_cache_bytes = 0
     for _ in range(repeats):
-        _synchronize(device)
+        sync(device)
         started = time.perf_counter()
         logits, cache = _cached_forward(
             model, tokens, boundary=prompt_boundary
         )
-        _synchronize(device)
+        sync(device)
         prefill_times.append(time.perf_counter() - started)
         measured_cache_bytes = cache_bytes(cache)
 
         sentence = None if trailing_sentence is None else list(trailing_sentence)
         token = logits[:, -1].argmax(dim=-1, keepdim=True)
-        _synchronize(device)
+        sync(device)
         started = time.perf_counter()
         for _step in range(incremental_steps):
             boundary = None
@@ -620,7 +587,7 @@ def efficiency_samples(
                 model, token, cache, boundary=boundary
             )
             token = logits[:, -1].argmax(dim=-1, keepdim=True)
-        _synchronize(device)
+        sync(device)
         incremental_times.append(time.perf_counter() - started)
     return {
         "prefill_times": prefill_times,
@@ -865,13 +832,6 @@ def train_run(
     }
 
 
-def write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True))
-    temporary.replace(path)
-
-
 def environment_fingerprint(device: str, precision: str) -> dict[str, Any]:
     packages = sorted(
         f"{distribution.metadata['Name']}=={distribution.version}"
@@ -937,15 +897,13 @@ def main() -> None:
         "environment": environment_fingerprint(args.device, args.precision),
         "data": {
             "first_manifest": str(first_manifest),
-            "first_manifest_hash": hashlib.sha256(
-                (first_manifest / "manifest.json").read_bytes()
-            ).hexdigest(),
-            "validation_manifest_hash": hashlib.sha256(
-                (args.validation_manifest / "manifest.json").read_bytes()
-            ).hexdigest(),
-            "confirmation_manifest_hash": hashlib.sha256(
-                (args.confirmation_manifest / "manifest.json").read_bytes()
-            ).hexdigest(),
+            "first_manifest_hash": file_sha256(first_manifest / "manifest.json"),
+            "validation_manifest_hash": file_sha256(
+                args.validation_manifest / "manifest.json"
+            ),
+            "confirmation_manifest_hash": file_sha256(
+                args.confirmation_manifest / "manifest.json"
+            ),
             "tokenizer_fingerprint": tokenizer_fingerprint(corpus.tokenizer),
             "boundary_detector_hash": corpus.manifest.get(
                 "boundary_detector_hash"

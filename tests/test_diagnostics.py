@@ -10,7 +10,15 @@ from __future__ import annotations
 import torch
 
 from lmf.data import ProceduralCorpus
-from lmf.diagnostics import component_report, diagnose, health_report, profile_model, sensitivity_report
+from lmf.diagnostics import (
+    cache_bytes,
+    component_report,
+    diagnose,
+    health_report,
+    parameter_count,
+    profile_model,
+    sensitivity_report,
+)
 from lmf.models.opet import OPETTransformerConfig, OPETTransformerLM
 from lmf.models.transformer import CachedTransformerLM, TransformerConfig
 
@@ -95,3 +103,26 @@ def test_diagnose_rhca_smoke(tiny_model, tiny_config):
                        n_batches=1, n_warmup=1, n_iters=1)
     assert report["summary"]["n_components"] > 0
     assert any(path.startswith("settle_ssm.blocks.") for path in report["components"])
+
+
+def test_parameter_count_matches_manual_sum():
+    model = _transformer()
+    assert parameter_count(model) == sum(p.numel() for p in model.parameters())
+
+
+def test_cache_bytes_tensor():
+    tensor = torch.zeros(4, 8, dtype=torch.float32)
+    assert cache_bytes(tensor) == 4 * 8 * 4  # float32 == 4 bytes/element
+
+
+def test_cache_bytes_nested_containers():
+    cache = {
+        "a": torch.zeros(2, dtype=torch.float32),
+        "b": [torch.zeros(3, dtype=torch.float32), torch.zeros(1, dtype=torch.float32)],
+    }
+    assert cache_bytes(cache) == (2 + 3 + 1) * 4
+
+
+def test_cache_bytes_non_tensor_is_zero():
+    assert cache_bytes("not a tensor") == 0
+    assert cache_bytes(42) == 0

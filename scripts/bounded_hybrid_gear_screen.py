@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import inspect
 import json
 import math
@@ -16,6 +15,8 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 
+from lmf.ablation.stats import analytic_confidence_interval
+from lmf.core.hashing import file_sha256, json_sha256
 from lmf.core.seeding import seed_everything
 from lmf.data import ContiguousDocumentLaneCorpus, PairedDocumentManifestCorpus
 from lmf.models.bounded_hybrid_gear import (
@@ -87,20 +88,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--attention-window", type=int, default=128)
     parser.add_argument("--block-tokens", type=int, default=128)
     return parser.parse_args()
-
-
-def file_hash(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
-
-
-def json_hash(value) -> str:
-    return hashlib.sha256(
-        json.dumps(value, sort_keys=True, default=str).encode()
-    ).hexdigest()
 
 
 def model_configs(vocab_size: int, args: argparse.Namespace):
@@ -246,19 +233,6 @@ def evaluate(model, manifest_root: Path, batch_size: int, max_rows: int):
     }
 
 
-def confidence_interval(values: list[float]) -> dict[str, float]:
-    mean = statistics.fmean(values)
-    if len(values) < 2:
-        return {"mean": mean, "lower": mean, "upper": mean}
-    standard_error = statistics.stdev(values) / math.sqrt(len(values))
-    radius = 4.303 * standard_error  # Student-t, df=2, two-sided 95%.
-    return {
-        "mean": mean,
-        "lower": mean - radius,
-        "upper": mean + radius,
-    }
-
-
 def main() -> None:
     args = parse_args()
     seeds = tuple(int(value) for value in args.seeds.split(","))
@@ -343,12 +317,12 @@ def main() -> None:
                 ),
                 "validation": validation,
                 "manifest": manifest,
-                "manifest_hash": json_hash(manifest),
+                "manifest_hash": json_sha256(manifest),
                 "architecture_fingerprint": architecture_fingerprint(
                     trainer.raw_model
                 ),
                 "checkpoint": str(checkpoint),
-                "checkpoint_hash": file_hash(checkpoint),
+                "checkpoint_hash": file_sha256(checkpoint),
             }
             report["runs"][name].append(run)
             (args.output_dir / "results.partial.json").write_text(
@@ -361,10 +335,10 @@ def main() -> None:
     summaries = {}
     for name, runs in report["runs"].items():
         summaries[name] = {
-            "macro_nll": confidence_interval(
+            "macro_nll": analytic_confidence_interval(
                 [run["validation"]["macro_domain_nll"] for run in runs]
             ),
-            "throughput": confidence_interval(
+            "throughput": analytic_confidence_interval(
                 [run["tokens_per_second"] for run in runs]
             ),
         }

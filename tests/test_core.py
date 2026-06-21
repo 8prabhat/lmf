@@ -6,7 +6,9 @@ import pytest
 import torch
 
 from lmf.core.config import apply_overrides, deep_merge, load_config
-from lmf.core.device import PrecisionPolicy, resolve_device
+from lmf.core.device import PrecisionPolicy, resolve_device, sync
+from lmf.core.hashing import file_sha256, git_tree_sha256, json_sha256
+from lmf.core.io import atomic_write_json
 from lmf.core.registry import Registry
 
 
@@ -66,3 +68,40 @@ def test_precision_policy_dtype():
 
 def test_resolve_device_cpu():
     assert resolve_device("cpu").type == "cpu"
+
+
+def test_sync_accepts_str_or_device_and_is_noop_on_cpu():
+    sync("cpu")
+    sync(resolve_device("cpu"))
+
+
+def test_file_sha256_matches_hashlib(tmp_path):
+    import hashlib
+
+    p = tmp_path / "f.txt"
+    p.write_bytes(b"hello world")
+    assert file_sha256(p) == hashlib.sha256(b"hello world").hexdigest()
+
+
+def test_json_sha256_is_order_independent():
+    assert json_sha256({"a": 1, "b": 2}) == json_sha256({"b": 2, "a": 1})
+
+
+def test_json_sha256_differs_for_different_values():
+    assert json_sha256({"a": 1}) != json_sha256({"a": 2})
+
+
+def test_git_tree_sha256_returns_stable_hex_digest():
+    first = git_tree_sha256(paths=("pyproject.toml",))
+    second = git_tree_sha256(paths=("pyproject.toml",))
+    assert first == second
+    assert len(first) == 64
+
+
+def test_atomic_write_json_round_trips(tmp_path):
+    import json
+
+    p = tmp_path / "nested" / "out.json"
+    atomic_write_json(p, {"a": 1, "b": [1, 2, 3]})
+    assert json.loads(p.read_text()) == {"a": 1, "b": [1, 2, 3]}
+    assert not p.with_suffix(p.suffix + ".tmp").exists()

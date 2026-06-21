@@ -4,20 +4,15 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import statistics
 from pathlib import Path
 from typing import Any
 
-try:
-    from scripts.pure_parallel_gear_common import (
-        holm_adjust,
-        paired_bootstrap_interval,
-    )
-except ModuleNotFoundError:
-    from pure_parallel_gear_common import holm_adjust, paired_bootstrap_interval
+from lmf.ablation.stats import holm_adjust, paired_bootstrap_interval, sign_test_paired
+from lmf.core.hashing import file_sha256
+from lmf.research_utils import bar_chart_svg
 
 
 def parse_args() -> argparse.Namespace:
@@ -33,23 +28,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=20261200)
     return parser.parse_args()
-
-
-def file_hash(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def sign_test_paired(values: list[float]) -> float:
-    positive = sum(value > 0 for value in values)
-    negative = sum(value < 0 for value in values)
-    count = positive + negative
-    if count == 0:
-        return 1.0
-    tail = min(positive, negative)
-    probability = sum(
-        math.comb(count, index) for index in range(tail + 1)
-    ) / 2**count
-    return min(1.0, 2.0 * probability)
 
 
 def seed_training_evidence(scale: dict[str, Any], seed: int) -> dict[str, Any]:
@@ -538,42 +516,6 @@ def markdown_report(result: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_bar_svg(
-    path: Path,
-    values: list[float],
-    labels: list[str],
-    title: str,
-    *,
-    baseline: float = 0.0,
-) -> None:
-    width, height = 760, 360
-    margin = 55
-    maximum = max([abs(value - baseline) for value in values] + [1e-6])
-    zero_y = height / 2
-    bar_width = (width - 2 * margin) / max(len(values), 1)
-    elements = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">',
-        '<rect width="100%" height="100%" fill="white"/>',
-        f'<text x="{width/2}" y="25" text-anchor="middle" font-size="18">{title}</text>',
-        f'<line x1="{margin}" y1="{zero_y}" x2="{width-margin}" y2="{zero_y}" stroke="black"/>',
-    ]
-    for index, (label, value) in enumerate(zip(labels, values)):
-        x = margin + index * bar_width + 0.15 * bar_width
-        delta = value - baseline
-        bar_height = abs(delta) / maximum * (height / 2 - 70)
-        y = zero_y - bar_height if delta >= 0 else zero_y
-        color = "#b2182b" if delta > 0 else "#2166ac"
-        elements.extend(
-            [
-                f'<rect x="{x:.1f}" y="{y:.1f}" width="{0.7*bar_width:.1f}" height="{bar_height:.1f}" fill="{color}"/>',
-                f'<text x="{x+0.35*bar_width:.1f}" y="{height-28}" text-anchor="middle" font-size="11">{label}</text>',
-                f'<text x="{x+0.35*bar_width:.1f}" y="{y-5 if delta>=0 else y+bar_height+15:.1f}" text-anchor="middle" font-size="10">{value:.4g}</text>',
-            ]
-        )
-    elements.append("</svg>")
-    path.write_text("\n".join(elements))
-
-
 def main() -> None:
     args = parse_args()
     scale = json.loads(args.scale_results.read_text())
@@ -628,7 +570,7 @@ def main() -> None:
         "ablations": ablations,
         "holm_adjusted_p": holm_adjust(p_values),
         "source_hashes": {
-            str(path): file_hash(path)
+            str(path): file_sha256(path)
             for path in (
                 args.scale_results,
                 args.evaluation_results,
@@ -659,14 +601,16 @@ def main() -> None:
         - run["equal_token"]["transformer"]["validation"]["macro_domain_nll"]
         for run in scale["runs"]
     ]
-    write_bar_svg(
+    bar_chart_svg(
         args.output_dir / "seed_nll_differences.svg",
-        nll_values,
         [f"seed {run['seed']}" for run in scale["runs"]],
+        nll_values,
         "Gear minus Transformer macro NLL (lower is better)",
+        diverging=True,
     )
-    write_bar_svg(
+    bar_chart_svg(
         args.output_dir / "efficiency_ratios.svg",
+        ["generation speedup", "cache ratio", "memory ratio"],
         [
             efficiency["incremental_speedup"],
             efficiency["cache_ratio"],
@@ -676,8 +620,8 @@ def main() -> None:
                 else 0.0
             ),
         ],
-        ["generation speedup", "cache ratio", "memory ratio"],
         "Long-context efficiency ratios",
+        diverging=True,
         baseline=1.0,
     )
     (args.output_dir / "final_evidence.json").write_text(

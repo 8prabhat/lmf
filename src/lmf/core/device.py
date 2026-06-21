@@ -46,7 +46,8 @@ def resolve_device(name: str | None = None) -> torch.device:
     raise ValueError(f"unknown device: {name!r}")
 
 
-def sync(device: torch.device) -> None:
+def sync(device: str | torch.device) -> None:
+    device = torch.device(device)
     if device.type == "cuda":
         torch.cuda.synchronize(device)
     elif device.type == "mps":

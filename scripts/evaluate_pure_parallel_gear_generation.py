@@ -19,10 +19,7 @@ import torch.nn.functional as F
 from lmf.data.corpora import EduCombinedCorpus
 from lmf.models.pure_parallel_gear import PureParallelGearLM
 from lmf.models.rhca.state import SamplingConfig
-try:
-    from scripts.pure_parallel_gear_common import load_model
-except ModuleNotFoundError:
-    from pure_parallel_gear_common import load_model
+from lmf.research_utils import load_model
 
 
 DOMAINS = (

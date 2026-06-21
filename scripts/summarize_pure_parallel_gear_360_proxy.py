@@ -4,15 +4,13 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import statistics
 from pathlib import Path
 
-try:
-    from scripts.pure_parallel_gear_common import paired_bootstrap_interval
-except ModuleNotFoundError:
-    from pure_parallel_gear_common import paired_bootstrap_interval
+from lmf.ablation.stats import paired_bootstrap_interval
+from lmf.core.hashing import file_sha256
+from lmf.research_utils import bar_chart_svg
 
 
 def parse_args():
@@ -23,10 +21,6 @@ def parse_args():
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--seed", type=int, default=20262300)
     return parser.parse_args()
-
-
-def sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def mean_natural(evaluation, model, length):
@@ -44,35 +38,6 @@ def mean_robustness(evaluation, model, key, metric="nll"):
     )
 
 
-def svg_bars(path: Path, title: str, labels, values, lower_is_better=True):
-    width, height, margin = 760, 390, 70
-    maximum = max(values) * 1.15
-    plot_height = height - 2 * margin
-    bar_width = (width - 2 * margin) / len(values)
-    colors = ("#2166ac", "#777777", "#b2182b")
-    rows = [
-        f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}">',
-        '<rect width="100%" height="100%" fill="white"/>',
-        f'<text x="{width/2}" y="28" text-anchor="middle" font-size="18">{title}</text>',
-        f'<line x1="{margin}" y1="{height-margin}" x2="{width-margin}" y2="{height-margin}" stroke="black"/>',
-    ]
-    for index, (label, value) in enumerate(zip(labels, values)):
-        x = margin + index * bar_width + 0.18 * bar_width
-        bar_height = value / maximum * plot_height
-        y = height - margin - bar_height
-        rows.extend(
-            [
-                f'<rect x="{x:.1f}" y="{y:.1f}" width="{0.64*bar_width:.1f}" height="{bar_height:.1f}" fill="{colors[index % len(colors)]}"/>',
-                f'<text x="{x+0.32*bar_width:.1f}" y="{height-margin+22}" text-anchor="middle" font-size="12">{label}</text>',
-                f'<text x="{x+0.32*bar_width:.1f}" y="{y-7:.1f}" text-anchor="middle" font-size="12">{value:.4g}</text>',
-            ]
-        )
-    direction = "lower" if lower_is_better else "higher"
-    rows.append(
-        f'<text x="{width-10}" y="{height-10}" text-anchor="end" font-size="10">{direction} is better</text>'
-    )
-    rows.append("</svg>")
-    path.write_text("\n".join(rows))
 
 
 def main():
@@ -241,7 +206,7 @@ def main():
             for row in generation["examples"][:3]
         ],
         "source_hashes": {
-            str(path): sha256(path)
+            str(path): file_sha256(path)
             for path in (args.training, args.evaluation, args.generation)
         },
         "limitations": [
@@ -259,32 +224,34 @@ def main():
     (args.output_dir / "summary.json").write_text(
         json.dumps(summary, indent=2, sort_keys=True)
     )
-    svg_bars(
+    bar_chart_svg(
         args.output_dir / "test_nll.svg",
-        "Held-out macro-domain NLL",
         ["Transformer", "GRU", "Gear"],
         [transformer_test_nll, gru_test_nll, gear_test_nll],
+        "Held-out macro-domain NLL",
+        lower_is_better=True,
     )
-    svg_bars(
+    bar_chart_svg(
         args.output_dir / "training_throughput.svg",
-        "Training supervised tokens/second",
         ["Transformer", "GRU", "Gear"],
         [
             training_models["transformer"]["tokens_per_second"],
             training_models["gru"]["tokens_per_second"],
             training_models["gear"]["tokens_per_second"],
         ],
+        "Training supervised tokens/second",
         lower_is_better=False,
     )
-    svg_bars(
+    bar_chart_svg(
         args.output_dir / "long_context_cache.svg",
-        "Generation cache bytes at 2,048-token prompt",
         ["Transformer", "GRU", "Gear"],
         [
             transformer_long["cache_bytes"],
             efficiency["gru"][long]["cache_bytes"],
             gear_long["cache_bytes"],
         ],
+        "Generation cache bytes at 2,048-token prompt",
+        lower_is_better=True,
     )
     lines = [
         "# Pure Parallel Gear 360° micro-proxy report",

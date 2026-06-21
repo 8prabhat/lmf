@@ -9,10 +9,18 @@ data, evaluation, or CLI layers.
 
 ```
 src/lmf/
-  core/         framework-agnostic contracts: interfaces, registry, config, device/precision, seeding
+  core/         framework-agnostic contracts: interfaces, registry, config, device/precision,
+                seeding, content hashing (hashing.py), atomic file IO (io.py)
   data/         tokenizers, corpora, batching, background prefetch
   training/     base Trainer (loop/optim/logging), callbacks, versioned checkpoints
   evaluation/   metrics (BPT, repetition) and structural benchmarks (long-context, tokens/settle)
+  ablation/     config-axis sweeps, generic structural ablation, and the shared statistics
+                module (bootstrap CI, Welch's t-test, sign test, Holm adjustment, ...)
+  diagnostics/  per-component profiling/health/sensitivity, parameter counting, cache-size
+                measurement -- generic over any registered model family
+  research_utils/ utilities specific to the one-off scripts in scripts/ (not the trainable
+                framework itself): family-aware checkpoint loading for evaluation, and
+                zero-dependency SVG report charts
   models/
     transformer/    parameter-matched baseline family + MGHT
     rhca/           rolling-frontier family (config, codebook, memory, dynamics, settle, model, trainer)
@@ -23,10 +31,12 @@ src/lmf/
     gru/            recurrent control baseline for Pure Gear studies
     opet/            OPET phase-enriched embedding family
     _shared/        cross-family infrastructure (not a registrable architecture)
-  experiments/  falsification kernels (RFK gates)
-  cli/          single `lmf` entrypoint: train | eval | generate | rfk
+  experiments/  falsification kernels (RFK gates) and the tokenizer benchmark harness (spt_bench)
+  cli/          single `lmf` entrypoint: train | eval | generate | rfk | spt-bench
 configs/        one YAML per experiment; merged over a base + environment overlay
-scripts/        thin wrappers around the CLI for train / evaluate / generate / rfk
+scripts/        CLI wrappers (train.py, evaluate.py, ...) plus standalone research/benchmark
+                drivers for the gear-family architectures; cross-cutting logic those drivers
+                share lives in src/lmf (ablation, core, diagnostics, research_utils), not here
 tests/          unit + smoke tests
 docs/RESEARCH_NOTES.md  condensed research log: every architecture decision,
                 tokenizer experiment, and pilot result produced in this repo

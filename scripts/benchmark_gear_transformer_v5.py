@@ -21,6 +21,7 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
+from lmf.core.device import sync
 from lmf.data import InMemoryTextCorpus
 from lmf.models.gear_transformer import (
     GearTransformerConfig,
@@ -98,13 +99,6 @@ def _nll(model: torch.nn.Module, windows: torch.Tensor) -> float:
     )
 
 
-def _synchronize(device: torch.device) -> None:
-    if device.type == "cuda":
-        torch.cuda.synchronize(device)
-    elif device.type == "mps":
-        torch.mps.synchronize()
-
-
 def _throughput(
     model: torch.nn.Module,
     windows: torch.Tensor,
@@ -116,17 +110,17 @@ def _throughput(
     with torch.no_grad():
         for _ in range(2):
             model(inputs)
-        _synchronize(device)
+        sync(device)
         started = time.perf_counter()
         for _ in range(repeats):
             model(inputs)
-        _synchronize(device)
+        sync(device)
     forward_seconds = time.perf_counter() - started
 
     model.train()
     for parameter in model.parameters():
         parameter.grad = None
-    _synchronize(device)
+    sync(device)
     started = time.perf_counter()
     for repeat in range(max(2, repeats // 2)):
         if hasattr(model, "training_step"):
@@ -143,7 +137,7 @@ def _throughput(
         loss.backward()
         for parameter in model.parameters():
             parameter.grad = None
-    _synchronize(device)
+    sync(device)
     backward_repeats = max(2, repeats // 2)
     training_seconds = time.perf_counter() - started
     tokens_per_repeat = inputs.numel()
