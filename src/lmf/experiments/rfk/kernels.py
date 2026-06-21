@@ -237,7 +237,7 @@ def rfk_echo_recovery(cfg: dict) -> dict:
     actual fix for the instability, not a bigger step count (which doesn't
     reliably rescue an unlucky seed within a fixed budget either, per direct
     measurement). windows=12 here is a CI-gate-reliability choice and is
-    independent of configs/rhca_v4.yaml's production max_train_windows (8) —
+    independent of configs/rhca.yaml's production max_train_windows (8) —
     a real run gets 20,000 steps of margin for whatever this kernel needs to
     mostly settle in 1500.
     """

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Thin wrapper: train a model from a config block.
 
-    python scripts/train.py --config configs/rhca_v4.yaml --block smoke
+    python scripts/train.py --config configs/rhca.yaml --block smoke
 """
 
 from __future__ import annotations

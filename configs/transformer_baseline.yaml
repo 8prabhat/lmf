@@ -1,5 +1,5 @@
 # Modern transformer baseline (RMSNorm + RoPE + SwiGLU + SDPA), with dim/layers/
-# heads matched to configs/rhca_v4.yaml. NOTE: matching these hyperparameters
+# heads matched to configs/rhca.yaml. NOTE: matching these hyperparameters
 # does NOT match total parameter count (RHCA's factorised codebook + memory mean
 # its param count differs substantially from a vanilla embedding+head transformer
 # at the "same" dim/layers/heads — check params_total before calling a comparison

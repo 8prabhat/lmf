@@ -46,9 +46,9 @@ docs/RESEARCH_NOTES.md  condensed research log: every architecture decision,
 
 ```bash
 pip install -e ".[dev]"
-lmf rfk --config configs/rhca_v4.yaml --block smoke      # falsification gates
-lmf train --config configs/rhca_v4.yaml --block smoke    # tiny smoke training run
-lmf eval  --config configs/rhca_v4.yaml --block smoke
+lmf rfk --config configs/rhca.yaml --block smoke      # falsification gates
+lmf train --config configs/rhca.yaml --block smoke    # tiny smoke training run
+lmf eval  --config configs/rhca.yaml --block smoke
 pytest
 ```
 
@@ -61,7 +61,7 @@ recommendations behind each one.
 | Registry name | Family | What it is | Config |
 | --- | --- | --- | --- |
 | `transformer` | baseline | RMSNorm + RoPE + SwiGLU + SDPA decoder-only Transformer, parameter-matched reference for every other family | `configs/transformer_baseline.yaml` |
-| `rhca` | RHCA | rolling-frontier model: bounded carried-state windows, factorized codebook, unshared deep macro steps, entropy-based block commits, SDPA exact-recall tail | `configs/rhca_v4.yaml` |
+| `rhca` | RHCA | rolling-frontier model: bounded carried-state windows, factorized codebook, unshared deep macro steps, entropy-based block commits, SDPA exact-recall tail | `configs/rhca.yaml` |
 | `opet` | OPET | `transformer` baseline with phase-enriched token embeddings (`OPETEmbedding`) and a coherence auxiliary loss | `configs/opet_baseline.yaml` |
 | `gear_transformer` (alias `mlgt`) | Stacked Parallel Gear Transformer V5 | Transformer trunk plus multi-rate banks of 5–20 positive-velocity rotating memories with causal and inter-bank carriers | `configs/gear_transformer.yaml` |
 | `gear_only` | Gear Transformer | the same gear mechanism with causal self-attention removed entirely | `configs/gear_transformer.yaml` |
