@@ -309,7 +309,7 @@ found that compositional initialization plus hierarchical output is the
 strongest supported configuration. Auxiliary hierarchy loss and segmentation
 dropout provide no confirmed quality gain while adding training cost. The
 complete methodology and confidence intervals are recorded in
-`docs/multigear_generation_360.md`.
+`docs/tokenizer/multigear_generation_360.md`.
 
 Remaining recommendations:
 

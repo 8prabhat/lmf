@@ -1,4 +1,4 @@
-# Three MultiGear-Native Model Architectures
+# Three MultiGear Baseline Model Architectures: MECM, MCPM, MRWT
 
 Date: 2026-06-16
 
