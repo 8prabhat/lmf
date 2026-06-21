@@ -1,12 +1,12 @@
 # Longer MECM + MultiGear pilot ablation over the same pretokenized edu subset
-# used by configs/generative_mecm_iteration.yaml.
+# used by configs/multigear_generative_comparison.yaml.
 #
 # This is still a pilot, not a final benchmark. It is meant to catch obvious
 # component bottlenecks after gates have begun to move away from zero.
 
 ablation:
   name: mecm_multigear_pretok_pilot200
-  base_config: configs/generative_mecm_iteration.yaml
+  base_config: configs/multigear_generative_comparison.yaml
   base_block: mecm_multigear_pilot200
   mode: one_at_a_time
   axes:

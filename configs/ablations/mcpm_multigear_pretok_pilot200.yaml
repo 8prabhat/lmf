@@ -4,7 +4,7 @@
 
 ablation:
   name: mcpm_multigear_pretok_pilot200
-  base_config: configs/generative_mecm_iteration.yaml
+  base_config: configs/multigear_generative_comparison.yaml
   base_block: mcpm_multigear_pilot200
   mode: one_at_a_time
   axes:

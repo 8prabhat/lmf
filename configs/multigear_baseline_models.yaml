@@ -1,4 +1,4 @@
-# MultiGear-native architecture baselines:
+# MultiGear baseline architectures (model-only ablations; not tied to one tokenizer):
 #   - MECM: non-Transformer causal mesh baseline
 #   - MCPM: non-Transformer surface path plus zero-gated execution trace adapter
 #   - MGCF: non-Transformer/non-Mamba fractal causal field baseline

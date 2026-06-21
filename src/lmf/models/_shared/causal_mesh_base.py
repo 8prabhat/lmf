@@ -1,4 +1,15 @@
-"""Shared components for the MultiGear-native architecture baselines."""
+"""Shared causal-mesh scaffolding used by the mecm, mcpm, and mgcf families.
+
+``NativeCausalLM`` and its component zoo are a single flexible implementation
+controlled by config flags (mesh residual, execution residual, full
+architecture, gear-aware output, ...). MECM and MCPM are thin named subclasses
+that only differ in which flags their builder sets; MGCF reuses the same
+gear-hierarchy and training/generation scaffolding through inheritance even
+though it replaces ``__init__`` and ``_forward_hidden`` with its own
+non-attention causal-field trunk. Splitting this into per-family copies would
+duplicate behavior and risk divergence, so it stays here as shared
+infrastructure rather than under any one family's folder.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +20,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from ..transformer.model import CachedTransformerLM, RMSNorm, TransformerConfig
+from ..transformer.model import RMSNorm
 
 
 def _gate_is_zero(gate: torch.Tensor) -> bool:
@@ -81,136 +92,6 @@ class NativeLMConfig:
         return asdict(self)
 
 
-@dataclass(frozen=True)
-class MGCFConfig:
-    """Configuration for the MultiGear Fractal Causal Field model.
-
-    MGCF is intentionally not a Transformer/Mamba variant. Its sequence mixer is
-    a bank of gated dilated causal convolutions plus causal prefix-memory views.
-    MultiGear hierarchy enters through input gear embeddings and the same
-    gear-aware output contract used by MECM.
-    """
-
-    vocab_size: int
-    dim: int = 256
-    layers: int = 6
-    kernel_size: int = 5
-    dilations: tuple[int, ...] = (1, 2, 4, 8)
-    memory_scales: tuple[int, ...] = (4, 16, 64)
-    max_seq_len: int = 2048
-    dropout: float = 0.0
-    hierarchy_gears: int = 6
-    input_gear_embedding: bool = True
-    hierarchy_composition: bool = True
-    byte_length_embedding: bool = True
-    max_token_bytes: int = 64
-    composition_gate_init: float = 0.05
-    composition_aux_weight: float = 0.0
-    gear_aware_output: bool = True
-    gear_output_mode: str = "bias"
-    gear_aux_weight: float = 0.0
-    memory_type: str = "learned"
-    memory_gate_init: float = 0.05
-
-    def __post_init__(self) -> None:
-        if self.vocab_size < 2:
-            raise ValueError("vocab_size must be at least 2")
-        if self.dim < 8:
-            raise ValueError("dim must be at least 8")
-        if self.layers < 1:
-            raise ValueError("layers must be positive")
-        if self.kernel_size < 2:
-            raise ValueError("kernel_size must be at least 2")
-        if not self.dilations:
-            raise ValueError("dilations must not be empty")
-        if any(int(d) < 1 for d in self.dilations):
-            raise ValueError("dilations must contain positive values")
-        if any(int(s) < 1 for s in self.memory_scales):
-            raise ValueError("memory_scales must contain positive values")
-        if self.max_seq_len < 2:
-            raise ValueError("max_seq_len must be at least 2")
-        if not 0.0 <= self.dropout < 1.0:
-            raise ValueError("dropout must be in [0, 1)")
-        if self.hierarchy_gears < 1:
-            raise ValueError("hierarchy_gears must be positive")
-        if self.max_token_bytes < 1:
-            raise ValueError("max_token_bytes must be positive")
-        if self.composition_aux_weight < 0.0:
-            raise ValueError("composition_aux_weight must be non-negative")
-        if self.gear_output_mode not in {"factorized", "bias"}:
-            raise ValueError("gear_output_mode must be 'factorized' or 'bias'")
-        if self.gear_aux_weight < 0.0:
-            raise ValueError("gear_aux_weight must be non-negative")
-        if self.memory_type not in {"average", "learned"}:
-            raise ValueError("memory_type must be 'average' or 'learned'")
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class MRWTConfig:
-    """Configuration for the Transformer-anchor residual workbench baseline."""
-
-    vocab_size: int
-    dim: int = 256
-    layers: int = 6
-    heads: int = 8
-    max_seq_len: int = 2048
-    dropout: float = 0.0
-    atlas_kernel_size: int = 9
-    workbench_kernel_size: int = 17
-    use_atlas: bool = True
-    use_workbench: bool = True
-    full_architecture: bool = False
-    atlas_kernel_sizes: tuple[int, ...] = (5, 17, 65)
-    workbench_rounds: int = 2
-    draft_horizons: tuple[int, ...] = (2, 4)
-    draft_aux_stride: int = 1
-    budget_aux_weight: float = 0.0
-    draft_aux_weight: float = 0.0
-
-    def __post_init__(self) -> None:
-        if self.vocab_size < 2:
-            raise ValueError("vocab_size must be at least 2")
-        if self.dim % self.heads:
-            raise ValueError("dim must be divisible by heads")
-        if self.layers < 1:
-            raise ValueError("layers must be positive")
-        if self.atlas_kernel_size < 2:
-            raise ValueError("atlas_kernel_size must be at least 2")
-        if self.workbench_kernel_size < 2:
-            raise ValueError("workbench_kernel_size must be at least 2")
-        if not 0.0 <= self.dropout < 1.0:
-            raise ValueError("dropout must be in [0, 1)")
-        if self.workbench_rounds < 0:
-            raise ValueError("workbench_rounds must be non-negative")
-        if not self.atlas_kernel_sizes:
-            raise ValueError("atlas_kernel_sizes must not be empty")
-        if any(int(k) < 2 for k in self.atlas_kernel_sizes):
-            raise ValueError("atlas_kernel_sizes must contain values >= 2")
-        if any(int(h) < 1 for h in self.draft_horizons):
-            raise ValueError("draft_horizons must contain positive offsets")
-        if self.draft_aux_stride < 1:
-            raise ValueError("draft_aux_stride must be positive")
-        if self.budget_aux_weight < 0.0:
-            raise ValueError("budget_aux_weight must be non-negative")
-        if self.draft_aux_weight < 0.0:
-            raise ValueError("draft_aux_weight must be non-negative")
-
-    def anchor_config(self) -> TransformerConfig:
-        return TransformerConfig(
-            vocab_size=self.vocab_size,
-            dim=self.dim,
-            layers=self.layers,
-            heads=self.heads,
-            max_seq_len=self.max_seq_len,
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
-
-
 class CausalDepthwiseConv(nn.Module):
     """Depthwise causal convolution over sequence positions."""
 
@@ -225,127 +106,6 @@ class CausalDepthwiseConv(nn.Module):
         y = F.pad(y, (self.kernel_size - 1, 0))
         y = self.conv(y)
         return y.transpose(1, 2)
-
-
-class CausalDilatedDepthwiseConv(nn.Module):
-    """Depthwise causal convolution with dilation and no future leakage."""
-
-    def __init__(self, dim: int, kernel_size: int, dilation: int) -> None:
-        super().__init__()
-        self.kernel_size = int(kernel_size)
-        self.dilation = int(dilation)
-        self.conv = nn.Conv1d(
-            dim,
-            dim,
-            self.kernel_size,
-            dilation=self.dilation,
-            groups=dim,
-            bias=False,
-        )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y = x.transpose(1, 2)
-        y = F.pad(y, ((self.kernel_size - 1) * self.dilation, 0))
-        y = self.conv(y)
-        return y.transpose(1, 2)
-
-
-class CausalPrefixMemory(nn.Module):
-    """Causal multi-scale prefix views using sliding averages.
-
-    This is deliberately deterministic and parallel under teacher forcing. It
-    gives MGCF cheap long-range context without attention or recurrent
-    selective-state machinery.
-    """
-
-    def __init__(self, dim: int, scales: tuple[int, ...]) -> None:
-        super().__init__()
-        self.scales = tuple(int(scale) for scale in scales)
-        self.proj = nn.Linear(dim * len(self.scales), dim, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y = x.transpose(1, 2)
-        views = []
-        for scale in self.scales:
-            padded = F.pad(y, (scale - 1, 0))
-            pooled = F.avg_pool1d(padded, kernel_size=scale, stride=1)
-            views.append(pooled.transpose(1, 2))
-        return self.proj(torch.cat(views, dim=-1))
-
-
-class LearnableCausalLongMemory(nn.Module):
-    """Learned multi-scale causal long filters.
-
-    Unlike fixed prefix averages, each scale owns a depthwise causal filter and
-    the model learns which long-range patterns to preserve. The operation is
-    still parallel under teacher forcing and contains no attention matrix.
-    """
-
-    def __init__(self, dim: int, scales: tuple[int, ...]) -> None:
-        super().__init__()
-        self.filters = nn.ModuleList(
-            [CausalDepthwiseConv(dim, int(scale)) for scale in scales]
-        )
-        self.router = nn.Linear(dim, len(scales), bias=False)
-        self.proj = nn.Linear(dim, dim, bias=False)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        weights = self.router(x).softmax(dim=-1)
-        views = torch.stack([long_filter(x) for long_filter in self.filters], dim=-2)
-        mixed = (views * weights.unsqueeze(-1)).sum(dim=-2)
-        return self.proj(F.silu(mixed))
-
-
-class FractalCausalFieldBlock(nn.Module):
-    """MGCF block: routed dilated causal fields plus prefix-memory residual."""
-
-    def __init__(
-        self,
-        dim: int,
-        kernel_size: int,
-        dilations: tuple[int, ...],
-        memory_scales: tuple[int, ...],
-        dropout: float = 0.0,
-        memory_type: str = "learned",
-        memory_gate_init: float = 0.05,
-    ) -> None:
-        super().__init__()
-        self.norm1 = RMSNorm(dim)
-        self.branches = nn.ModuleList(
-            [
-                CausalDilatedDepthwiseConv(dim, kernel_size, int(dilation))
-                for dilation in dilations
-            ]
-        )
-        self.router = nn.Linear(dim, len(dilations), bias=False)
-        self.mix = nn.Linear(dim, 2 * dim, bias=False)
-        self.proj = nn.Linear(dim, dim, bias=False)
-        self.memory_norm = RMSNorm(dim)
-        if memory_scales and memory_type == "learned":
-            self.memory = LearnableCausalLongMemory(dim, memory_scales)
-        elif memory_scales:
-            self.memory = CausalPrefixMemory(dim, memory_scales)
-        else:
-            self.memory = None
-        self.memory_gate = nn.Parameter(torch.tensor(float(memory_gate_init)))
-        self.norm2 = RMSNorm(dim)
-        self.ff_gate = nn.Linear(dim, 4 * dim, bias=False)
-        self.ff_up = nn.Linear(dim, 4 * dim, bias=False)
-        self.ff_down = nn.Linear(4 * dim, dim, bias=False)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        z = self.norm1(x)
-        weights = self.router(z).softmax(dim=-1)
-        fields = torch.stack([branch(z) for branch in self.branches], dim=-2)
-        mixed = (fields * weights.unsqueeze(-1)).sum(dim=-2)
-        gate, value = self.mix(mixed).chunk(2, dim=-1)
-        x = x + self.dropout(self.proj(F.silu(gate) * value))
-        if self.memory is not None:
-            x = x + self.memory_gate * self.dropout(self.memory(self.memory_norm(x)))
-        z = self.norm2(x)
-        x = x + self.dropout(self.ff_down(F.silu(self.ff_gate(z)) * self.ff_up(z)))
-        return x
 
 
 class CausalConvBlock(nn.Module):
@@ -703,39 +463,6 @@ class ContractVerifier(nn.Module):
         return loss / 3.0
 
 
-class BudgetController(nn.Module):
-    """MRWT profile selector trained with deterministic pseudo budgets."""
-
-    profile_count = 4
-
-    def __init__(self, dim: int) -> None:
-        super().__init__()
-        self.norm = RMSNorm(dim)
-        self.profile_head = nn.Linear(dim, self.profile_count, bias=False)
-        self.profile_embed = nn.Embedding(self.profile_count, dim)
-        self.gate = nn.Parameter(torch.zeros(()))
-
-    def forward(self, hidden: torch.Tensor) -> torch.Tensor:
-        if not self.training and _gate_is_zero(self.gate):
-            return hidden
-        probs = self.profile_head(self.norm(hidden)).softmax(dim=-1)
-        return hidden + self.gate * (probs @ self.profile_embed.weight)
-
-    def loss(self, hidden: torch.Tensor, tokens: torch.Tensor, valid_next: torch.Tensor) -> torch.Tensor:
-        if tokens.shape[1] < 2:
-            return hidden.sum() * 0.0
-        nxt = tokens[:, 1:]
-        targets = torch.zeros_like(nxt)
-        targets = torch.where(nxt < 256, torch.ones_like(targets), targets)
-        targets = torch.where((nxt % 7) == 0, torch.full_like(targets, 2), targets)
-        targets = torch.where((nxt % 11) == 0, torch.full_like(targets, 3), targets)
-        logits = self.profile_head(self.norm(hidden[:, :-1]))
-        losses = F.cross_entropy(
-            logits.reshape(-1, logits.shape[-1]), targets.reshape(-1), reduction="none"
-        ).reshape_as(targets)
-        return (losses * valid_next.to(losses.dtype)).sum() / valid_next.sum().clamp_min(1)
-
-
 def sample_from_logits(logits: torch.Tensor, cfg: Any | None = None) -> torch.Tensor:
     """Sample one token per row, honoring the repository SamplingConfig shape."""
 
@@ -787,13 +514,6 @@ def init_embedding(module: nn.Embedding) -> None:
     nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
 
-def transformer_anchor(config: MRWTConfig) -> CachedTransformerLM:
-    anchor = CachedTransformerLM(config.anchor_config())
-    # Match the non-anchor heads' initialization scale when residual modules are
-    # enabled later. The anchor itself already initializes its tied embedding.
-    return anchor
-
-
 def parameter_count(module: nn.Module) -> int:
     return sum(parameter.numel() for parameter in module.parameters())
 
@@ -803,3 +523,407 @@ def positional_ids(length: int, max_seq_len: int, device: torch.device) -> torch
     # an index error. It is approximate and should be replaced by RoPE/ALiBi for
     # serious large-context MECM/MCPM runs.
     return torch.arange(length, device=device) % max_seq_len
+
+
+class NativeCausalLM(nn.Module):
+    """Non-Transformer causal baseline used for MECM, MCPM, and (via inheritance) MGCF."""
+
+    family_name = "native_causal"
+
+    def __init__(self, config: NativeLMConfig) -> None:
+        super().__init__()
+        self.config = config
+        self.token = nn.Embedding(config.vocab_size, config.dim)
+        self.position = nn.Embedding(config.max_seq_len, config.dim)
+        self.blocks = nn.ModuleList(
+            [
+                CausalConvBlock(config.dim, config.kernel_size, config.dropout)
+                for _ in range(config.layers)
+            ]
+        )
+        self.mesh = ZeroGatedCausalSummary(config.dim) if config.mesh_residual else None
+        if config.full_architecture:
+            self.span_atlas = MultiScaleSpanAtlas(config.dim, tuple(config.atlas_kernel_sizes))
+            self.active_cover = ActiveCoverRouter(config.dim, tuple(config.atlas_kernel_sizes))
+            self.reasoning_mesh = SparseReasoningMesh(
+                config.dim, config.mesh_layers, max(config.kernel_size, max(config.atlas_kernel_sizes))
+            )
+            self.draft_tree = HierarchicalDraftHead(
+                config.dim,
+                config.vocab_size,
+                tuple(config.draft_horizons),
+                stride=config.draft_aux_stride,
+            )
+        else:
+            self.span_atlas = None
+            self.active_cover = None
+            self.reasoning_mesh = None
+            self.draft_tree = None
+        self.execution = (
+            ExecutionTraceAdapter(config.dim, config.vocab_size)
+            if config.execution_residual
+            else None
+        )
+        if config.full_architecture and config.execution_residual:
+            self.program_controller = ProgramController(config.dim)
+            self.execution_workbench = ExecutionWorkbench(
+                config.dim, max(1, config.mesh_layers), config.kernel_size
+            )
+            self.contract_verifier = ContractVerifier(config.dim)
+        else:
+            self.program_controller = None
+            self.execution_workbench = None
+            self.contract_verifier = None
+        self.norm = nn.LayerNorm(config.dim)
+        self.head = nn.Linear(config.dim, config.vocab_size, bias=False)
+        self.head.weight = self.token.weight
+        self.gear_head = (
+            nn.Linear(config.dim, config.hierarchy_gears, bias=False)
+            if config.gear_aware_output or config.gear_aux_weight > 0.0
+            else None
+        )
+        if self.gear_head is not None:
+            self.register_buffer(
+                "_token_gears",
+                torch.full((config.vocab_size,), -1, dtype=torch.long),
+            )
+            self.register_buffer(
+                "_token_to_local",
+                torch.full((config.vocab_size,), -1, dtype=torch.long),
+            )
+            self.register_buffer(
+                "_gear_active",
+                torch.zeros(config.hierarchy_gears, dtype=torch.bool),
+            )
+        init_embedding(self.token)
+        if self.gear_head is not None:
+            nn.init.normal_(self.gear_head.weight, mean=0.0, std=0.02)
+
+    def _forward_hidden(self, ids: torch.Tensor) -> torch.Tensor:
+        pos = positional_ids(ids.shape[1], self.config.max_seq_len, ids.device)
+        hidden = self.token(ids) + self.position(pos)[None]
+        for block in self.blocks:
+            hidden = block(hidden)
+        if self.mesh is not None:
+            hidden = self.mesh(hidden)
+        if self.span_atlas is not None:
+            hidden = self.span_atlas(hidden)
+        if self.active_cover is not None:
+            hidden = self.active_cover(hidden)
+        if self.reasoning_mesh is not None:
+            hidden = self.reasoning_mesh(hidden)
+        if self.execution is not None:
+            hidden = self.execution(hidden, ids)
+        if self.program_controller is not None:
+            hidden = self.program_controller(hidden)
+        if self.execution_workbench is not None:
+            hidden = self.execution_workbench(hidden)
+        if self.contract_verifier is not None:
+            hidden = self.contract_verifier(hidden)
+        return self.norm(hidden)
+
+    def _logits_from_hidden(self, hidden: torch.Tensor) -> torch.Tensor:
+        if self.config.gear_aware_output:
+            if self.config.gear_output_mode == "bias":
+                return self._gear_biased_scores(hidden)
+            return self._hierarchical_scores(hidden)
+        return self.head(hidden)
+
+    def configure_token_hierarchy(
+        self,
+        gear_count: int,
+        token_gears: list[int],
+        token_children: list[list[int]] | None = None,
+        token_bytes: list[list[int]] | None = None,
+    ) -> None:
+        """Install MultiGear token->gear metadata for gear-aware output."""
+        if self.gear_head is None:
+            return
+        if gear_count > self.config.hierarchy_gears:
+            raise ValueError(
+                f"tokenizer needs {gear_count} gears, model supports "
+                f"{self.config.hierarchy_gears}"
+            )
+        if len(token_gears) != self.config.vocab_size:
+            raise ValueError("token_gears length must equal model vocabulary size")
+        if hasattr(self, "_token_children"):
+            if token_children is None:
+                raise ValueError("token_children are required by this model")
+            if len(token_children) != self.config.vocab_size:
+                raise ValueError("token_children length must equal model vocabulary size")
+        if hasattr(self, "_token_byte_lengths"):
+            if token_bytes is None:
+                raise ValueError("token_bytes are required by this model")
+            if len(token_bytes) != self.config.vocab_size:
+                raise ValueError("token_bytes length must equal model vocabulary size")
+        gears = torch.tensor(token_gears, dtype=torch.long, device=self._token_gears.device)
+        if bool(((gears < 0) | (gears >= gear_count)).any()):
+            raise ValueError("token gear outside declared gear_count")
+        if hasattr(self, "_token_children"):
+            children = torch.tensor(
+                token_children, dtype=torch.long, device=self._token_children.device
+            )
+            if bool(((children < -1) | (children >= self.config.vocab_size)).any()):
+                raise ValueError("token child outside vocabulary")
+            self._token_children.copy_(children)
+        if hasattr(self, "_token_byte_lengths"):
+            lengths = torch.tensor(
+                [
+                    min(len(values), getattr(self.config, "max_token_bytes", 64))
+                    for values in token_bytes
+                ],
+                dtype=torch.long,
+                device=self._token_byte_lengths.device,
+            )
+            self._token_byte_lengths.copy_(lengths)
+        local = torch.full_like(self._token_to_local, -1)
+        active = torch.zeros_like(self._gear_active)
+        for gear in range(gear_count):
+            token_ids = torch.nonzero(gears == gear, as_tuple=False).flatten()
+            active[gear] = bool(len(token_ids))
+            local[token_ids] = torch.arange(len(token_ids), device=local.device)
+        self._token_gears.copy_(gears)
+        self._token_to_local.copy_(local)
+        self._gear_active.copy_(active)
+
+    def _require_token_hierarchy(self) -> None:
+        if self.gear_head is None:
+            raise RuntimeError("gear-aware output is not enabled")
+        if not bool(self._gear_active.any()):
+            raise RuntimeError(
+                "token hierarchy is required; build with a MultiGear tokenizer "
+                "or call configure_token_hierarchy()"
+            )
+
+    def _gear_logits(self, hidden: torch.Tensor) -> torch.Tensor:
+        self._require_token_hierarchy()
+        logits = self.gear_head(hidden)
+        return logits.masked_fill(~self._gear_active, float("-inf"))
+
+    def _hierarchical_scores(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Return full-vocabulary log scores from gear + within-gear factors."""
+        self._require_token_hierarchy()
+        token_scores = self.head(hidden)
+        gear_log_probs = self._gear_logits(hidden).log_softmax(dim=-1)
+        normalizers = []
+        for gear in range(self.config.hierarchy_gears):
+            token_ids = torch.nonzero(self._token_gears == gear, as_tuple=False).flatten()
+            if len(token_ids):
+                normalizers.append(
+                    token_scores.index_select(-1, token_ids).logsumexp(dim=-1)
+                )
+            else:
+                normalizers.append(torch.zeros_like(token_scores[..., 0]))
+        within_gear_normalizers = torch.stack(normalizers, dim=-1)
+        return (
+            token_scores
+            - within_gear_normalizers.index_select(-1, self._token_gears)
+            + gear_log_probs.index_select(-1, self._token_gears)
+        )
+
+    def _gear_biased_scores(self, hidden: torch.Tensor) -> torch.Tensor:
+        """Cheaper gear-aware scores: token logits plus token-gear bias."""
+        self._require_token_hierarchy()
+        return self.head(hidden) + self._gear_logits(hidden).index_select(-1, self._token_gears)
+
+    @staticmethod
+    def _valid_next(tokens: torch.Tensor, meta: dict[str, Any]) -> torch.Tensor:
+        valid = torch.ones_like(tokens[:, 1:], dtype=torch.bool)
+        if meta.get("loss_mask") is not None:
+            valid = valid & meta["loss_mask"][:, 1:].bool()
+        if meta.get("attention_mask") is not None:
+            valid = valid & meta["attention_mask"][:, 1:].bool()
+        return valid
+
+    def _hierarchical_language_modeling_loss(
+        self,
+        hidden: torch.Tensor,
+        targets: torch.Tensor,
+        valid: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        self._require_token_hierarchy()
+        target_gears = self._token_gears[targets]
+        gear_logits = self._gear_logits(hidden)
+        gear_losses = F.cross_entropy(
+            gear_logits.reshape(-1, gear_logits.shape[-1]),
+            target_gears.reshape(-1),
+            reduction="none",
+        ).reshape_as(targets)
+        valid_float = valid.to(gear_losses.dtype)
+        count = valid_float.sum().clamp_min(1)
+        gear_loss = (gear_losses * valid_float).sum() / count
+
+        token_loss_sum = hidden.sum() * 0.0
+        for gear in range(self.config.hierarchy_gears):
+            positions = valid & (target_gears == gear)
+            if not bool(positions.any()):
+                continue
+            token_ids = torch.nonzero(self._token_gears == gear, as_tuple=False).flatten()
+            local_logits = F.linear(hidden[positions], self.token.weight[token_ids])
+            local_targets = self._token_to_local[targets[positions]]
+            token_loss_sum = token_loss_sum + F.cross_entropy(
+                local_logits, local_targets, reduction="sum"
+            )
+        token_loss = token_loss_sum / count
+        return gear_loss + token_loss, gear_loss, token_loss
+
+    def _gear_auxiliary_loss(
+        self,
+        hidden: torch.Tensor,
+        targets: torch.Tensor,
+        valid: torch.Tensor,
+    ) -> torch.Tensor:
+        self._require_token_hierarchy()
+        target_gears = self._token_gears[targets]
+        gear_logits = self._gear_logits(hidden)
+        gear_losses = F.cross_entropy(
+            gear_logits.reshape(-1, gear_logits.shape[-1]),
+            target_gears.reshape(-1),
+            reduction="none",
+        ).reshape_as(targets)
+        valid_float = valid.to(gear_losses.dtype)
+        return (gear_losses * valid_float).sum() / valid_float.sum().clamp_min(1)
+
+    def forward(self, ids: torch.Tensor, attention_mask=None, **_: Any):
+        # attention_mask is accepted for trainer/evaluator compatibility. These
+        # non-Transformer baselines do not attend to pad tokens; loss masking
+        # still prevents pad positions from contributing to training/eval loss.
+        hidden = self._forward_hidden(ids)
+        return self._logits_from_hidden(hidden), None
+
+    def training_step(
+        self,
+        tokens: torch.Tensor,
+        task_metadata: dict[str, Any] | None = None,
+        loss_term_scales: dict[str, float] | None = None,
+    ) -> dict[str, torch.Tensor]:
+        meta = task_metadata or {}
+        hidden = self._forward_hidden(tokens)
+        valid_next = self._valid_next(tokens, meta)
+        prediction_hidden = hidden[:, :-1]
+        targets = tokens[:, 1:]
+        if (
+            self.config.gear_aware_output
+            and self.config.gear_output_mode == "factorized"
+        ):
+            language_modeling, gear_prediction, within_gear = (
+                self._hierarchical_language_modeling_loss(
+                    prediction_hidden, targets, valid_next
+                )
+            )
+        else:
+            logits = self._logits_from_hidden(hidden)
+            language_modeling = lm_cross_entropy(
+                logits,
+                tokens,
+                loss_mask=meta.get("loss_mask"),
+                attention_mask=meta.get("attention_mask"),
+            )
+            gear_prediction = None
+            within_gear = None
+        scale = (loss_term_scales or {}).get("language_modeling", 1.0)
+        total = scale * language_modeling
+        result = {"language_modeling": language_modeling}
+        if gear_prediction is not None:
+            result["gear_prediction"] = gear_prediction
+            result["within_gear"] = within_gear
+        if self.config.gear_aux_weight > 0.0:
+            gear_aux = self._gear_auxiliary_loss(prediction_hidden, targets, valid_next)
+            total = total + (
+                self.config.gear_aux_weight
+                * (loss_term_scales or {}).get("gear_aux", 1.0)
+                * gear_aux
+            )
+            result["gear_aux"] = gear_aux
+        composition_aux_weight = getattr(self.config, "composition_aux_weight", 0.0)
+        if composition_aux_weight > 0.0 and hasattr(self, "_composition_auxiliary_loss"):
+            composition_aux = self._composition_auxiliary_loss(
+                prediction_hidden, targets, valid_next
+            )
+            total = total + (
+                composition_aux_weight
+                * (loss_term_scales or {}).get("composition_aux", 1.0)
+                * composition_aux
+            )
+            result["composition_aux"] = composition_aux
+        if self.active_cover is not None and self.config.route_aux_weight > 0.0:
+            route_loss = self.active_cover.last_balance_loss
+            if route_loss is not None:
+                total = total + (
+                    self.config.route_aux_weight
+                    * (loss_term_scales or {}).get("route_balance", 1.0)
+                    * route_loss
+                )
+                result["route_balance"] = route_loss
+        if self.draft_tree is not None and self.config.draft_aux_weight > 0.0:
+            draft_loss = self.draft_tree.loss(hidden, tokens, valid_next)
+            total = total + (
+                self.config.draft_aux_weight
+                * (loss_term_scales or {}).get("draft_tree", 1.0)
+                * draft_loss
+            )
+            result["draft_tree"] = draft_loss
+        if self.program_controller is not None and self.config.program_aux_weight > 0.0:
+            program_loss = self.program_controller.loss(hidden, tokens, valid_next)
+            total = total + (
+                self.config.program_aux_weight
+                * (loss_term_scales or {}).get("program_controller", 1.0)
+                * program_loss
+            )
+            result["program_controller"] = program_loss
+        if self.contract_verifier is not None and self.config.verifier_aux_weight > 0.0:
+            verifier_loss = self.contract_verifier.loss(hidden, tokens, valid_next)
+            total = total + (
+                self.config.verifier_aux_weight
+                * (loss_term_scales or {}).get("contract_verifier", 1.0)
+                * verifier_loss
+            )
+            result["contract_verifier"] = verifier_loss
+        result["total"] = total
+        return result
+
+    def _sample_hierarchical_token(self, hidden: torch.Tensor, sampling_config=None) -> torch.Tensor:
+        """Sample gear first, then sample only from that gear's token subset."""
+        gears = sample_from_logits(self._gear_logits(hidden), sampling_config).squeeze(-1)
+        output = torch.empty((hidden.shape[0], 1), dtype=torch.long, device=hidden.device)
+        for gear in torch.unique(gears).tolist():
+            rows = torch.nonzero(gears == gear, as_tuple=False).flatten()
+            token_ids = torch.nonzero(self._token_gears == gear, as_tuple=False).flatten()
+            local_logits = F.linear(hidden[rows], self.token.weight[token_ids])
+            local_choice = sample_from_logits(local_logits, sampling_config).squeeze(-1)
+            output[rows, 0] = token_ids[local_choice]
+        return output
+
+    @torch.no_grad()
+    def generate(self, prompt_tokens: torch.Tensor, max_new_tokens: int, sampling_config=None):
+        if prompt_tokens.ndim != 2:
+            raise ValueError("prompt_tokens must be a rank-2 tensor")
+        if max_new_tokens < 0:
+            raise ValueError("max_new_tokens must be non-negative")
+        sequence = prompt_tokens
+        out = []
+        for _ in range(max_new_tokens):
+            if (
+                self.config.gear_aware_output
+                and self.config.gear_output_mode == "factorized"
+            ):
+                hidden = self._forward_hidden(sequence)
+                token = self._sample_hierarchical_token(hidden[:, -1], sampling_config)
+            else:
+                logits, _ = self(sequence)
+                token = sample_from_logits(logits[:, -1], sampling_config)
+            out.append(token)
+            sequence = torch.cat([sequence, token], dim=1)
+        if not out:
+            return torch.empty(
+                prompt_tokens.shape[0], 0, dtype=torch.long, device=prompt_tokens.device
+            )
+        return torch.cat(out, dim=1)
+
+    def architecture_manifest(self) -> dict[str, Any]:
+        return {
+            "name": type(self).__name__,
+            "family": self.family_name,
+            "config": self.config.to_dict(),
+            "parameters": {"total": parameter_count(self)},
+        }

@@ -14,13 +14,15 @@ src/lmf/
   training/     base Trainer (loop/optim/logging), callbacks, versioned checkpoints
   evaluation/   metrics (BPT, repetition) and structural benchmarks (long-context, tokens/settle)
   models/
-    native/        MultiGear-native baselines: MECM, MCPM, MGCF, MRWT
-    rhca/           rolling-frontier family (config, codebook, memory, dynamics, settle, model, trainer)
     transformer/    parameter-matched baseline family + MGHT
-    gear_transformer/ Historical Transformer/gear hybrid family
-    pure_parallel_gear/ Canonical attention-free persistent-rotor LM
+    rhca/           rolling-frontier family (config, codebook, memory, dynamics, settle, model, trainer)
+    gear_transformer/ Transformer trunk + parallel phase-conditioned gear side-channel
+    pure_parallel_gear/ canonical attention-free persistent-rotor LM
+    bounded_hybrid_gear/ bounded local-attention trunk + scan-based Gear memory, switchable fusion
+    mecm/ mcpm/ mgcf/ mrwt/ MultiGear baseline architectures (mecm/mcpm share scaffolding via _shared/)
     gru/            recurrent control baseline for Pure Gear studies
     opet/            OPET phase-enriched embedding family
+    _shared/        cross-family infrastructure (not a registrable architecture)
   experiments/  falsification kernels (RFK gates)
   cli/          single `lmf` entrypoint: train | eval | generate | rfk
 configs/        one YAML per experiment; merged over a base + environment overlay
@@ -66,14 +68,15 @@ recommendations behind each one.
 | `gear_transformer` (alias `mlgt`) | Stacked Parallel Gear Transformer V5 | Transformer trunk plus multi-rate banks of 5–20 positive-velocity rotating memories with causal and inter-bank carriers | `configs/gear_transformer.yaml` |
 | `gear_only` | Gear Transformer | the same gear mechanism with causal self-attention removed entirely | `configs/gear_transformer.yaml` |
 | `pure_parallel_gear` | Pure Parallel Gear | attention-free LM whose only cross-token state is independently rotating rotor banks with explicit noncommutative sentence-boundary clutches and a constant-size generation cache | `configs/pure_parallel_gear.yaml` |
+| `pure_parallel_gear_v3`, `hybrid_parallel_gear`, `bounded_transformer`, `bounded_hybrid_gear_block_additive`, `bounded_hybrid_gear_block_selective_film`, `bounded_hybrid_gear_block_bank_router` | Bounded Hybrid Gear | bounded local-attention trunk plus scan-based Gear memory at token rate or block rate, with switchable fusion (additive / selective-FiLM / bank-router) | `configs/bounded_hybrid_gear*.yaml` |
 | `gru_lm` | GRU control | parameter-matched recurrent control used to distinguish gear-specific gains from generic recurrence | benchmark-generated |
-| `mght` | MultiGear-native | `transformer` plus a learned MultiGear input-gear embedding and hierarchical (`bias`/`factorized`) gear-aware output head | `configs/generative_mecm_iteration.yaml` |
-| `mecm` | MultiGear-native | non-Transformer causal long-convolution trunk with a zero-gated mesh residual | `configs/multigear_native_models.yaml` |
-| `mcpm` | MultiGear-native | non-Transformer surface model with a zero-gated deterministic execution-trace adapter | `configs/multigear_native_models.yaml` |
-| `mgcf` | MultiGear-native | non-Transformer, non-Mamba MultiGear Fractal Causal Field: routed dilated causal branches, learned causal long-filter memory, MultiGear child composition, gear-aware output | `configs/multigear_native_models.yaml` |
-| `mrwt` | MultiGear-native | Transformer anchor with zero-gated causal atlas/workbench residual adapters and an exact anchor fallback | `configs/multigear_native_models.yaml` |
+| `mght` | MultiGear baseline | `transformer` plus a learned MultiGear input-gear embedding and hierarchical (`bias`/`factorized`) gear-aware output head | `configs/multigear_generative_comparison.yaml` |
+| `mecm` | MultiGear baseline | non-Transformer causal long-convolution trunk with a zero-gated mesh residual | `configs/multigear_baseline_models.yaml` |
+| `mcpm` | MultiGear baseline | non-Transformer surface model with a zero-gated deterministic execution-trace adapter | `configs/multigear_baseline_models.yaml` |
+| `mgcf` | MultiGear baseline | non-Transformer, non-Mamba MultiGear Fractal Causal Field: routed dilated causal branches, learned causal long-filter memory, MultiGear child composition, gear-aware output | `configs/multigear_baseline_models.yaml` |
+| `mrwt` | MultiGear baseline | Transformer anchor with zero-gated causal atlas/workbench residual adapters and an exact anchor fallback | `configs/multigear_baseline_models.yaml` |
 
-`rhca` is the framework's primary resident family. The MultiGear-native models
+`rhca` is the framework's primary resident family. The MultiGear baseline models
 (`mecm`, `mcpm`, `mgcf`, `mrwt`, `mght`) and the Gear Transformer family are
 research baselines exploring whether MultiGear hierarchy or a gear side-channel
 can beat a matched Transformer + SentencePiece BPE -- as of the latest pilots
@@ -139,20 +142,20 @@ PYTHONPATH=src .venv/bin/python scripts/benchmark_gear_transformer_v5.py
 ```
 
 ```bash
-lmf train    --config configs/multigear_native_models.yaml --block smoke_mecm --steps 10
-lmf train    --config configs/multigear_native_models.yaml --block smoke_mcpm --steps 10
-lmf train    --config configs/multigear_native_models.yaml --block smoke_mgcf --steps 10
-lmf train    --config configs/multigear_native_models.yaml --block smoke_mrwt --steps 10
-lmf eval     --config configs/multigear_native_models.yaml --block smoke_mrwt --n-batches 2
-lmf generate --config configs/multigear_native_models.yaml --block smoke_mecm --max-new-tokens 32
+lmf train    --config configs/multigear_baseline_models.yaml --block smoke_mecm --steps 10
+lmf train    --config configs/multigear_baseline_models.yaml --block smoke_mcpm --steps 10
+lmf train    --config configs/multigear_baseline_models.yaml --block smoke_mgcf --steps 10
+lmf train    --config configs/multigear_baseline_models.yaml --block smoke_mrwt --steps 10
+lmf eval     --config configs/multigear_baseline_models.yaml --block smoke_mrwt --n-batches 2
+lmf generate --config configs/multigear_baseline_models.yaml --block smoke_mecm --max-new-tokens 32
 ```
 
 Full research variants add ablation-visible modules around those safe paths:
 
 ```bash
-lmf train --config configs/multigear_native_models.yaml --block full_smoke_mecm --steps 10
-lmf train --config configs/multigear_native_models.yaml --block full_smoke_mcpm --steps 10
-lmf train --config configs/multigear_native_models.yaml --block full_smoke_mrwt --steps 10
+lmf train --config configs/multigear_baseline_models.yaml --block full_smoke_mecm --steps 10
+lmf train --config configs/multigear_baseline_models.yaml --block full_smoke_mcpm --steps 10
+lmf train --config configs/multigear_baseline_models.yaml --block full_smoke_mrwt --steps 10
 ```
 
 The matching one-at-a-time ablation specs are:
@@ -172,12 +175,12 @@ named for structural ablation, for example `span_atlas.scales.skip[0]`,
 For the already-downloaded pre-tokenized corpus:
 
 ```bash
-lmf train --config configs/multigear_native_models.yaml --block edu_mecm
-lmf train --config configs/multigear_native_models.yaml --block edu_mcpm
-lmf train --config configs/multigear_native_models.yaml --block edu_mrwt
-lmf train --config configs/multigear_native_models.yaml --block edu_full_mecm
-lmf train --config configs/multigear_native_models.yaml --block edu_full_mcpm
-lmf train --config configs/multigear_native_models.yaml --block edu_full_mrwt
+lmf train --config configs/multigear_baseline_models.yaml --block edu_mecm
+lmf train --config configs/multigear_baseline_models.yaml --block edu_mcpm
+lmf train --config configs/multigear_baseline_models.yaml --block edu_mrwt
+lmf train --config configs/multigear_baseline_models.yaml --block edu_full_mecm
+lmf train --config configs/multigear_baseline_models.yaml --block edu_full_mcpm
+lmf train --config configs/multigear_baseline_models.yaml --block edu_full_mrwt
 ```
 
 `edu_combined` samples the large `train_bpe32768_v2.bin` shards with numpy
@@ -248,7 +251,7 @@ lmf pretokenize-edu-sentencepiece-bpe \
   --fraction 0.10 \
   --max-bpe-tokens-per-domain 200000
 
-lmf train --config configs/generative_mecm_iteration.yaml \
+lmf train --config configs/multigear_generative_comparison.yaml \
   --block transformer_sentencepiece_matched_smoke \
   --steps 200 \
   --checkpoint outputs/checkpoints/transformer_sentencepiece_matched_pilot200.pt \
@@ -256,7 +259,7 @@ lmf train --config configs/generative_mecm_iteration.yaml \
   --set trainer.warmup_steps=20 \
   --set run.steps=200
 
-lmf eval --config configs/generative_mecm_iteration.yaml \
+lmf eval --config configs/multigear_generative_comparison.yaml \
   --block transformer_sentencepiece_matched_smoke \
   --checkpoint outputs/checkpoints/transformer_sentencepiece_matched_pilot200.pt \
   --n-batches 5 \

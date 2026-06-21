@@ -2,7 +2,7 @@
 
 ablation:
   name: multigear_full_mecm
-  base_config: configs/multigear_native_models.yaml
+  base_config: configs/multigear_baseline_models.yaml
   base_block: full_smoke_mecm
   mode: one_at_a_time
   axes:

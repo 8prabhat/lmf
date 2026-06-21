@@ -3,8 +3,10 @@ reproducible sampler state (F4)."""
 
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 
+import numpy as np
 import pytest
 import torch
 
@@ -247,3 +249,38 @@ def test_materialize_sentencepiece_bpe_from_edu_combined_samples_all_domains(tmp
     assert {domain["domain"] for domain in report["domains"]} == {"domain_a", "domain_b"}
     corpus = EduCombinedCorpus(str(output), tokenizer_name="sp_sampled_tok", seed=3)
     assert corpus.sample_tokenized(2, 16, "train").shape == (2, 16)
+
+
+def _tiny_edu_root(tmp_path):
+    root = tmp_path / "edu"
+    domain = root / "toy"
+    domain.mkdir(parents=True)
+    train = (np.arange(512, dtype=np.uint16) % 64).astype(np.uint16)
+    train.tofile(domain / "train_bpe32768_v2.bin")
+    manifest = {
+        "dtype": "uint16",
+        "train_tokens": int(train.size),
+        "vocab_size": 64,
+        "tokenizer_fingerprint": "test",
+    }
+    (domain / "train_bpe32768_v2.bin.manifest.json").write_text(json.dumps(manifest))
+    torch.save(torch.arange(160, dtype=torch.int32) % 64, domain / "valid_bpe32768_v2.pt")
+    torch.save((torch.arange(160, dtype=torch.int32) + 1) % 64, domain / "test_bpe32768_v2.pt")
+    return root
+
+
+def test_edu_combined_memmap_sampling_and_sampler_state(tmp_path):
+    corpus = EduCombinedCorpus(str(_tiny_edu_root(tmp_path)), load_tokenizer=False, seed=123)
+    assert corpus.vocab_size == 64
+    batch = corpus.sample_tokenized(4, 32, "train")
+    assert batch.shape == (4, 32)
+    assert batch.dtype == torch.long
+    valid = corpus.sample_tokenized(2, 24, "valid")
+    test = corpus.sample_tokenized(2, 24, "test")
+    assert valid.shape == test.shape == (2, 24)
+
+    state = corpus.sampler_state()
+    first = corpus.sample_tokenized(2, 16, "train")
+    corpus.load_sampler_state(state)
+    again = corpus.sample_tokenized(2, 16, "train")
+    assert torch.equal(first, again)

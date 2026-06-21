@@ -52,7 +52,7 @@ retrieval, graph editing, or reasoning workspace machinery.
 Early 200-step result: MGCF bias now beats the plain MultiGear Transformer and
 MGHT bias on the 20-batch pilot, but it does not yet beat MGHT factorized or
 the SentencePiece Transformer baseline. See
-`results/generative_mecm_iteration/mgcf_frontier_pilot200_summary.md`.
+`results/multigear_generative_comparison/mgcf_frontier_pilot200_summary.md`.
 
 ## Shared MultiGear Foundation
 

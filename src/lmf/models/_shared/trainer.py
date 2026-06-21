@@ -1,13 +1,12 @@
-"""Trainer registrations for the MultiGear-native model families."""
+"""Shared trainer used by the mecm, mcpm, mgcf, and mrwt families."""
 
 from __future__ import annotations
 
-from ...core.registry import TRAINERS
 from ...training.base_trainer import BaseTrainer
 
 
 class NativeLMTrainer(BaseTrainer):
-    """Generic trainer for MECM, MCPM, and MRWT."""
+    """Generic trainer for MECM, MCPM, MGCF, and MRWT."""
 
     def _metric_bpt(self, batch_size: int, seq_len: int, n_batches: int = 10,
                     split: str = "valid") -> float:
@@ -18,7 +17,7 @@ class NativeLMTrainer(BaseTrainer):
         )
 
 
-def _drop_irrelevant(kwargs: dict) -> dict:
+def drop_irrelevant(kwargs: dict) -> dict:
     for key in (
         "segment_len",
         "scheduled_sampling_start",
@@ -33,23 +32,3 @@ def _drop_irrelevant(kwargs: dict) -> dict:
     ):
         kwargs.pop(key, None)
     return kwargs
-
-
-@TRAINERS.register("mecm")
-def build_mecm_trainer(model, corpus, **kwargs) -> NativeLMTrainer:
-    return NativeLMTrainer(model, corpus, **_drop_irrelevant(kwargs))
-
-
-@TRAINERS.register("mcpm")
-def build_mcpm_trainer(model, corpus, **kwargs) -> NativeLMTrainer:
-    return NativeLMTrainer(model, corpus, **_drop_irrelevant(kwargs))
-
-
-@TRAINERS.register("mgcf")
-def build_mgcf_trainer(model, corpus, **kwargs) -> NativeLMTrainer:
-    return NativeLMTrainer(model, corpus, **_drop_irrelevant(kwargs))
-
-
-@TRAINERS.register("mrwt")
-def build_mrwt_trainer(model, corpus, **kwargs) -> NativeLMTrainer:
-    return NativeLMTrainer(model, corpus, **_drop_irrelevant(kwargs))
