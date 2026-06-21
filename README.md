@@ -224,7 +224,7 @@ To derive a diverse MultiGear subset from the existing `edu_combined` BPE shards
 ```bash
 lmf pretokenize-edu-multigear \
   --source-root "/path/to/edu_combined" \
-  --output-root outputs/multigear_prepared \
+  --output-root outputs/tokenizer/multigear_prepared \
   --source-tokenizer-name bpe32768_v2 \
   --tokenizer-name multigear_edu_subset_v1 \
   --vocab-size 4096 \
@@ -244,7 +244,7 @@ of the same sampled text and evaluate byte-normalized loss:
 ```bash
 lmf pretokenize-edu-sentencepiece-bpe \
   --source-root "/path/to/edu_combined" \
-  --output-root outputs/sentencepiece_bpe_prepared \
+  --output-root outputs/tokenizer/sentencepiece_bpe_prepared \
   --source-tokenizer-name bpe32768_v2 \
   --tokenizer-name sentencepiece_bpe_edu_subset_v1 \
   --vocab-size 4096 \
@@ -254,14 +254,14 @@ lmf pretokenize-edu-sentencepiece-bpe \
 lmf train --config configs/multigear_generative_comparison.yaml \
   --block transformer_sentencepiece_matched_smoke \
   --steps 200 \
-  --checkpoint outputs/checkpoints/transformer_sentencepiece_matched_pilot200.pt \
+  --checkpoint checkpoints/transformer/transformer_sentencepiece_matched_pilot200.pt \
   --set trainer.total_steps=200 \
   --set trainer.warmup_steps=20 \
   --set run.steps=200
 
 lmf eval --config configs/multigear_generative_comparison.yaml \
   --block transformer_sentencepiece_matched_smoke \
-  --checkpoint outputs/checkpoints/transformer_sentencepiece_matched_pilot200.pt \
+  --checkpoint checkpoints/transformer/transformer_sentencepiece_matched_pilot200.pt \
   --n-batches 5 \
   --set trainer.total_steps=200 \
   --set trainer.warmup_steps=20 \

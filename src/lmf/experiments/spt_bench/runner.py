@@ -61,7 +61,7 @@ def _bytes_per_token(tokenizer, text: str) -> float:
     return len(text.encode("utf-8")) / max(len(tokenizer.encode(text)), 1)
 
 
-def run(config_path: str, block: str = "smoke", out_dir: str = "outputs/spt_bench") -> dict:
+def run(config_path: str, block: str = "smoke", out_dir: str = "outputs/tokenizer/spt_bench") -> dict:
     cfg = load_config(config_path, block=block).raw
     seed = int(cfg.get("seed", 0))
     seed_everything(seed)

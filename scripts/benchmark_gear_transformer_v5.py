@@ -59,12 +59,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--output",
         type=Path,
-        default=ROOT / "outputs/gear_transformer_v5_results.json",
+        default=ROOT / "outputs/gear_transformer/gear_transformer_v5_results.json",
     )
     parser.add_argument(
         "--checkpoint",
         type=Path,
-        default=ROOT / "outputs/checkpoints/gear_transformer_v5.pt",
+        default=ROOT / "checkpoints/gear_transformer/gear_transformer_v5.pt",
     )
     return parser.parse_args()
 

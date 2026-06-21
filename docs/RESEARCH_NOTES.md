@@ -4,7 +4,7 @@ Condensed record of every architecture decision, tokenizer experiment, and
 pilot result produced in this repo. Replaces the previous five `docs/*.md`
 files and the fourteen `results/**/*.md` summaries, which carried a lot of
 repeated caveats and have been folded in here. Raw JSON artifacts referenced
-below still live under `results/` and `outputs/spt_bench/`.
+below still live under `results/` and `outputs/tokenizer/spt_bench/`.
 
 Shared caveat that applies to every pilot table in this document unless
 stated otherwise: single seed, 200-1,000 training steps, a handful of
@@ -36,6 +36,24 @@ No model or folder is named generically "native" -- the four MultiGear
 baseline architectures (mecm/mcpm/mgcf/mrwt) are independently named and
 registered; only the cross-family scaffolding they share lives in the
 leading-underscore `_shared/` infra namespace.
+
+**Checkpoints and outputs** (both gitignored) follow the same per-family
+convention as the table above:
+
+- `checkpoints/<family>/*.pt` is the single canonical location for every
+  trained checkpoint -- e.g. `checkpoints/mecm/`, `checkpoints/gear_transformer/`,
+  `checkpoints/transformer/` (also holds `mght` checkpoints, since `mght` is a
+  transformer variant, not a separate family). There is no second
+  `outputs/checkpoints/` location.
+- `outputs/<family>/` holds everything else family-specific: logs, JSON
+  results, screening runs, prepared-data caches used only by that family's
+  scripts.
+- `outputs/tokenizer/` holds tokenizer-only artifacts shared across model
+  families: `spt_bench/`, `multigear_prepared/`,
+  `multigear_prediction_aware_prepared/`,
+  `multigear_prediction_aware_matched_prepared/`, `sentencepiece_bpe_prepared/`.
+- `outputs/rfk/` holds falsification-kernel reports, which are a cross-cutting
+  framework diagnostic, not tied to one model family.
 
 ## 1. TL;DR / Current Recommendation
 
@@ -106,7 +124,7 @@ context +0.00013, future prediction +0.01937, fast bank +0.00344, and slow bank
 at +0.00055. Sparse phase and explicit inter-bank coupling were positive but very
 small (about +0.00004 and +0.000005 NLL), so larger-corpus confirmation is
 still required. Full results and generated predictions are in
-`outputs/gear_transformer_v5_acceptance_results.json`.
+`outputs/gear_transformer/gear_transformer_v5_acceptance_results.json`.
 
 V4 replaces the earlier sequential V3 controller with parallel local, phrase,
 semantic, and discourse gear trains. It uses positive-only phase velocity,
@@ -531,7 +549,7 @@ bits/text-byte.
 
 ## 9. Where the Raw Data Lives
 
-- `outputs/spt_bench/*.json` -- tokenizer benchmark artifacts (FLORES intrinsic,
+- `outputs/tokenizer/spt_bench/*.json` -- tokenizer benchmark artifacts (FLORES intrinsic,
   generation-360, compositional-init, runtime).
 - `results/ablations/*/summary.md` -> deleted; regenerate via `lmf ablate`
   using the configs in `configs/ablations/`.

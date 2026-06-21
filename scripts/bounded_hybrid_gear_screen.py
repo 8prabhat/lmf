@@ -46,17 +46,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--corpus-root",
         type=Path,
-        default=Path("outputs/sentencepiece_bpe_prepared"),
+        default=Path("outputs/tokenizer/sentencepiece_bpe_prepared"),
     )
     parser.add_argument(
         "--index-root",
         type=Path,
-        default=Path("outputs/pure_parallel_gear_360_proxy/index"),
+        default=Path("outputs/pure_parallel_gear/360_proxy/index"),
     )
     parser.add_argument(
         "--validation-manifest",
         type=Path,
-        default=Path("outputs/pure_parallel_gear_360_proxy/validation"),
+        default=Path("outputs/pure_parallel_gear/360_proxy/validation"),
     )
     parser.add_argument(
         "--output-dir",

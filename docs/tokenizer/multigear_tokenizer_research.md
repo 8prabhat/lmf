@@ -334,7 +334,7 @@ Remaining recommendations:
   --flores-root /path/to/flores200_dataset \
   --vocab-size 8192 \
   --tokenizers multigear spt byte_bpe sentencepiece_bpe sentencepiece_unigram \
-  --out outputs/spt_bench/multilingual_flores22_8k_multigear_final.json
+  --out outputs/tokenizer/spt_bench/multilingual_flores22_8k_multigear_final.json
 
 .venv/bin/python scripts/benchmark_tokenizer_lm_impact.py \
   --flores-root /path/to/flores200_dataset \
@@ -342,7 +342,7 @@ Remaining recommendations:
   --tokenizers multigear spt byte_bpe sentencepiece_bpe sentencepiece_unigram \
   --seeds 0 1 2 \
   --steps 300 \
-  --out outputs/spt_bench/tokenizer_lm_impact_flores22_8k_multigear_final.json
+  --out outputs/tokenizer/spt_bench/tokenizer_lm_impact_flores22_8k_multigear_final.json
 
 .venv/bin/python scripts/benchmark_tokenizer_generation.py \
   --flores-root /path/to/flores200_dataset \
@@ -354,17 +354,17 @@ Remaining recommendations:
   --context-bytes 48 \
   --target-bytes 4 \
   --eval-per-language 10 \
-  --out outputs/spt_bench/tokenizer_generation_flores22_8k_exact_span_final.json
+  --out outputs/tokenizer/spt_bench/tokenizer_generation_flores22_8k_exact_span_final.json
 
 .venv/bin/python scripts/benchmark_multigear_compositional_init.py \
   --flores-root /path/to/flores200_dataset \
   --seeds 0 1 2 3 4 \
-  --out outputs/spt_bench/multigear_compositional_init_flores22_8k.json
+  --out outputs/tokenizer/spt_bench/multigear_compositional_init_flores22_8k.json
 
 .venv/bin/python scripts/benchmark_multigear_compositional_init.py \
   --flores-root /path/to/flores200_dataset \
   --seeds 5 6 7 8 9 \
-  --out outputs/spt_bench/multigear_compositional_init_flores22_8k_seeds5_9.json
+  --out outputs/tokenizer/spt_bench/multigear_compositional_init_flores22_8k_seeds5_9.json
 
 .venv/bin/lmf train \
   --config configs/multigear_recommended.yaml \
@@ -376,7 +376,7 @@ Remaining recommendations:
   --target-bytes 4 8 16 \
   --steps 3000 \
   --eval-per-language 200 \
-  --out outputs/spt_bench/tokenizer_generation_360_flores22_8k.json
+  --out outputs/tokenizer/spt_bench/tokenizer_generation_360_flores22_8k.json
 
 .venv/bin/python scripts/benchmark_multigear_compositional_init.py \
   --flores-root /path/to/flores200_dataset \
@@ -385,7 +385,7 @@ Remaining recommendations:
   --hierarchy-aux-weight 0.10 \
   --hierarchy-aux-target bytes \
   --segmentation-dropout-prob 0.10 \
-  --out outputs/spt_bench/multigear_enhanced_generation.json
+  --out outputs/tokenizer/spt_bench/multigear_enhanced_generation.json
 ```
 
 ## Implementation Notes

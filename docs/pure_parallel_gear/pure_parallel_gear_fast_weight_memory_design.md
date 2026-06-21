@@ -185,7 +185,7 @@ iteration.
 ## Validation plan (unchanged, with one addition)
 
 Same 500K-token capacity-probe re-run as the original plan, comparing
-against `outputs/pure_parallel_gear_360_proxy/capacity_probe_20260620/results.json`.
+against `outputs/pure_parallel_gear/360_proxy/capacity_probe_20260620/results.json`.
 Additionally track `copy_gate_balance` and the realized mean gate value
 alongside `memory_energy` and val_top1 — if val_top1 breaks the plateau but
 the mean gate value is pinned near 1 (not near `copy_gate_target_mean`),

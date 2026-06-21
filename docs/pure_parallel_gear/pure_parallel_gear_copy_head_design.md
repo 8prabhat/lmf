@@ -2,7 +2,7 @@
 
 ## Problem this addresses
 
-The capacity probe (`outputs/pure_parallel_gear_360_proxy/capacity_probe_20260620/results.json`)
+The capacity probe (`outputs/pure_parallel_gear/360_proxy/capacity_probe_20260620/results.json`)
 showed gear's validation top1 accuracy moves once (50K→100K tokens) then freezes
 bit-for-bit for the remaining 400K tokens of a 500K-token run, while training loss
 keeps falling. Transformer and GRU both keep improving over the same budget. This
@@ -121,6 +121,6 @@ cheap relative to `settle()`'s existing cost, to be confirmed by profiling once 
 
 Re-run the same `probe_pure_parallel_gear_capacity.py` 500K-token comparison with
 `use_local_copy_head=True` and compare against the saved baseline curve at
-`outputs/pure_parallel_gear_360_proxy/capacity_probe_20260620/results.json`. Success
+`outputs/pure_parallel_gear/360_proxy/capacity_probe_20260620/results.json`. Success
 criterion: validation top1 should keep climbing past the ~100K-token point where
 the un-augmented model flatlined, rather than reproducing the same frozen plateau.

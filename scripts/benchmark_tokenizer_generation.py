@@ -642,7 +642,7 @@ def main() -> None:
     parser.add_argument(
         "--out",
         type=Path,
-        default=Path("outputs/spt_bench/tokenizer_generation.json"),
+        default=Path("outputs/tokenizer/spt_bench/tokenizer_generation.json"),
     )
     args = parser.parse_args()
     report = run(

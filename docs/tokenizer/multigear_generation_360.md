@@ -126,9 +126,9 @@ production-efficient tokenizer.
 
 ## Artifacts
 
-- `outputs/spt_bench/tokenizer_generation_360_flores22_8k.json`
-- `outputs/spt_bench/tokenizer_generation_360_hierarchy_confirmation_seeds10_19.json`
-- `outputs/spt_bench/tokenizer_runtime_repeated_flores22_8k.json`
+- `outputs/tokenizer/spt_bench/tokenizer_generation_360_flores22_8k.json`
+- `outputs/tokenizer/spt_bench/tokenizer_generation_360_hierarchy_confirmation_seeds10_19.json`
+- `outputs/tokenizer/spt_bench/tokenizer_runtime_repeated_flores22_8k.json`
 - `scripts/benchmark_tokenizer_generation_360.py`
 - `scripts/benchmark_tokenizer_runtime_repeated.py`
 - `configs/multigear_recommended.yaml`
@@ -142,7 +142,7 @@ production-efficient tokenizer.
   --target-bytes 4 8 16 \
   --steps 3000 \
   --eval-per-language 200 \
-  --out outputs/spt_bench/tokenizer_generation_360_flores22_8k.json
+  --out outputs/tokenizer/spt_bench/tokenizer_generation_360_flores22_8k.json
 
 .venv/bin/python scripts/benchmark_tokenizer_generation_360.py \
   --flores-root /path/to/flores200_dataset \
@@ -152,5 +152,5 @@ production-efficient tokenizer.
   --eval-per-language 200 \
   --variants sentencepiece_bpe multigear_compositional \
     multigear_hierarchical multigear_hierarchical_aux multigear_full \
-  --out outputs/spt_bench/tokenizer_generation_360_hierarchy_confirmation_seeds10_19.json
+  --out outputs/tokenizer/spt_bench/tokenizer_generation_360_hierarchy_confirmation_seeds10_19.json
 ```

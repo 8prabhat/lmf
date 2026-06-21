@@ -191,7 +191,7 @@ def main() -> None:
     parser.add_argument("--vocab-size", type=int, default=8192)
     parser.add_argument("--languages", nargs="*", default=DEFAULT_LANGUAGES)
     parser.add_argument("--tokenizers", nargs="*", default=None)
-    parser.add_argument("--out", type=Path, default=Path("outputs/spt_bench/multilingual.json"))
+    parser.add_argument("--out", type=Path, default=Path("outputs/tokenizer/spt_bench/multilingual.json"))
     args = parser.parse_args()
     report = run(
         args.flores_root,

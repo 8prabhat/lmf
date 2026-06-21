@@ -8,7 +8,7 @@
 # Prepare data first:
 #   lmf pretokenize-edu-sentencepiece-bpe \
 #     --source-root /path/to/edu_combined \
-#     --output-root outputs/sentencepiece_bpe_prepared \
+#     --output-root outputs/tokenizer/sentencepiece_bpe_prepared \
 #     --tokenizer-name sentencepiece_bpe_edu_subset_v1 \
 #     --vocab-size 4096 \
 #     --fraction 0.10 \
@@ -16,7 +16,7 @@
 #
 #   lmf pretokenize-edu-multigear \
 #     --source-root /path/to/edu_combined \
-#     --output-root outputs/multigear_prepared \
+#     --output-root outputs/tokenizer/multigear_prepared \
 #     --tokenizer-name multigear_edu_subset_v1 \
 #     --vocab-size 4096 \
 #     --fraction 0.10 \
@@ -24,7 +24,7 @@
 #
 #   lmf pretokenize-edu-multigear-prediction-aware \
 #     --source-root /path/to/edu_combined \
-#     --output-root outputs/multigear_prediction_aware_prepared \
+#     --output-root outputs/tokenizer/multigear_prediction_aware_prepared \
 #     --tokenizer-name multigear_prediction_aware_edu_subset_v1 \
 #     --vocab-size 4096 \
 #     --fraction 0.10 \
@@ -38,7 +38,7 @@ base:
   precision: bf16
   data:
     name: edu_combined
-    root: outputs/sentencepiece_bpe_prepared
+    root: outputs/tokenizer/sentencepiece_bpe_prepared
     tokenizer_name: sentencepiece_bpe_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -80,7 +80,7 @@ transformer_sentencepiece_matched_smoke:
 transformer_multigear_matched_pilot200:
   data:
     name: edu_combined
-    root: outputs/multigear_prepared
+    root: outputs/tokenizer/multigear_prepared
     tokenizer_name: multigear_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -105,7 +105,7 @@ transformer_multigear_matched_pilot200:
 mght_multigear_bias_pilot200:
   data:
     name: edu_combined
-    root: outputs/multigear_prepared
+    root: outputs/tokenizer/multigear_prepared
     tokenizer_name: multigear_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -133,7 +133,7 @@ mght_multigear_bias_pilot200:
 mght_multigear_factorized_pilot200:
   data:
     name: edu_combined
-    root: outputs/multigear_prepared
+    root: outputs/tokenizer/multigear_prepared
     tokenizer_name: multigear_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -161,7 +161,7 @@ mght_multigear_factorized_pilot200:
 mgcf_multigear_bias_pilot200:
   data:
     name: edu_combined
-    root: outputs/multigear_prepared
+    root: outputs/tokenizer/multigear_prepared
     tokenizer_name: multigear_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -200,7 +200,7 @@ mgcf_multigear_bias_pilot200:
 mgcf_multigear_factorized_pilot200:
   data:
     name: edu_combined
-    root: outputs/multigear_prepared
+    root: outputs/tokenizer/multigear_prepared
     tokenizer_name: multigear_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -239,7 +239,7 @@ mgcf_multigear_factorized_pilot200:
 mgcf_multigear_prediction_aware_bias_pilot200:
   data:
     name: edu_combined
-    root: outputs/multigear_prediction_aware_prepared
+    root: outputs/tokenizer/multigear_prediction_aware_prepared
     tokenizer_name: multigear_prediction_aware_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -278,7 +278,7 @@ mgcf_multigear_prediction_aware_bias_pilot200:
 mgcf_multigear_prediction_aware_matched_bias_pilot200:
   data:
     name: edu_combined
-    root: outputs/multigear_prediction_aware_matched_prepared
+    root: outputs/tokenizer/multigear_prediction_aware_matched_prepared
     tokenizer_name: multigear_prediction_aware_matched_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -366,7 +366,7 @@ mecm_sentencepiece_smoke:
 mecm_multigear_smoke:
   data:
     name: edu_combined
-    root: outputs/multigear_prepared
+    root: outputs/tokenizer/multigear_prepared
     tokenizer_name: multigear_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -393,7 +393,7 @@ mecm_multigear_smoke:
 mecm_multigear_pilot200:
   data:
     name: edu_combined
-    root: outputs/multigear_prepared
+    root: outputs/tokenizer/multigear_prepared
     tokenizer_name: multigear_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -424,7 +424,7 @@ mecm_multigear_pilot200:
 mecm_multigear_no_draft_aux_pilot200:
   data:
     name: edu_combined
-    root: outputs/multigear_prepared
+    root: outputs/tokenizer/multigear_prepared
     tokenizer_name: multigear_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -455,7 +455,7 @@ mecm_multigear_no_draft_aux_pilot200:
 mecm_multigear_gear_aware_pilot200:
   data:
     name: edu_combined
-    root: outputs/multigear_prepared
+    root: outputs/tokenizer/multigear_prepared
     tokenizer_name: multigear_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -489,7 +489,7 @@ mecm_multigear_gear_aware_pilot200:
 mecm_multigear_gear_aware_aux_pilot200:
   data:
     name: edu_combined
-    root: outputs/multigear_prepared
+    root: outputs/tokenizer/multigear_prepared
     tokenizer_name: multigear_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -523,7 +523,7 @@ mecm_multigear_gear_aware_aux_pilot200:
 mecm_multigear_gear_bias_pilot200:
   data:
     name: edu_combined
-    root: outputs/multigear_prepared
+    root: outputs/tokenizer/multigear_prepared
     tokenizer_name: multigear_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -558,7 +558,7 @@ mecm_multigear_gear_bias_pilot200:
 mecm_multigear_gear_bias_aux_pilot200:
   data:
     name: edu_combined
-    root: outputs/multigear_prepared
+    root: outputs/tokenizer/multigear_prepared
     tokenizer_name: multigear_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -620,7 +620,7 @@ mcpm_sentencepiece_pilot200:
 mcpm_multigear_pilot200:
   data:
     name: edu_combined
-    root: outputs/multigear_prepared
+    root: outputs/tokenizer/multigear_prepared
     tokenizer_name: multigear_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -679,7 +679,7 @@ mrwt_sentencepiece_pilot200:
 mrwt_multigear_pilot200:
   data:
     name: edu_combined
-    root: outputs/multigear_prepared
+    root: outputs/tokenizer/multigear_prepared
     tokenizer_name: multigear_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -711,7 +711,7 @@ mrwt_multigear_pilot200:
 mcpm_multigear_no_draft_aux_pilot200:
   data:
     name: edu_combined
-    root: outputs/multigear_prepared
+    root: outputs/tokenizer/multigear_prepared
     tokenizer_name: multigear_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -744,7 +744,7 @@ mcpm_multigear_no_draft_aux_pilot200:
 mcpm_multigear_minimal_pilot200:
   data:
     name: edu_combined
-    root: outputs/multigear_prepared
+    root: outputs/tokenizer/multigear_prepared
     tokenizer_name: multigear_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
@@ -769,7 +769,7 @@ mcpm_multigear_minimal_pilot200:
 mrwt_multigear_anchor_pilot200:
   data:
     name: edu_combined
-    root: outputs/multigear_prepared
+    root: outputs/tokenizer/multigear_prepared
     tokenizer_name: multigear_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true

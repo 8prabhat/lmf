@@ -7,7 +7,7 @@
 #   python scripts/train.py --config configs/gear_transformer.yaml --block smoke --steps 10
 #   lmf pretokenize-sentencepiece-bpe \
 #     --source data/my_corpus.txt \
-#     --output-root outputs/sentencepiece_bpe_prepared \
+#     --output-root outputs/tokenizer/sentencepiece_bpe_prepared \
 #     --tokenizer-name sentencepiece_bpe_v1 \
 #     --vocab-size 32768
 
@@ -275,7 +275,7 @@ gear_only_smoke:
 sentencepiece_smoke:
   data:
     name: edu_combined
-    root: outputs/sentencepiece_bpe_prepared
+    root: outputs/tokenizer/sentencepiece_bpe_prepared
     tokenizer_name: sentencepiece_bpe_v1
     sample_weights: tokens
     eval_max_tokens_per_domain: 200000
@@ -339,7 +339,7 @@ sentencepiece_smoke:
 sentencepiece_transformer_matched:
   data:
     name: edu_combined
-    root: outputs/sentencepiece_bpe_prepared
+    root: outputs/tokenizer/sentencepiece_bpe_prepared
     tokenizer_name: sentencepiece_bpe_v1
     sample_weights: tokens
     eval_max_tokens_per_domain: 200000
@@ -365,7 +365,7 @@ sentencepiece_transformer_matched:
 sentencepiece_gear_only_smoke:
   data:
     name: edu_combined
-    root: outputs/sentencepiece_bpe_prepared
+    root: outputs/tokenizer/sentencepiece_bpe_prepared
     tokenizer_name: sentencepiece_bpe_v1
     sample_weights: tokens
     eval_max_tokens_per_domain: 200000

@@ -18,7 +18,7 @@ base:
   precision: bf16
   data:
     name: edu_combined
-    root: "outputs/multigear_prepared"
+    root: "outputs/tokenizer/multigear_prepared"
     tokenizer_name: multigear_edu_subset_v1
     sample_weights: tokens
     load_tokenizer: true
