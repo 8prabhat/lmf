@@ -34,10 +34,10 @@ from lmf.training.checkpoints import save_checkpoint
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CORPUS = ROOT / "outputs/gear_transformer_comparison/sample_corpus_repeated.txt"
+DEFAULT_CORPUS = ROOT / "outputs/gear_transformer/comparison/sample_corpus_repeated.txt"
 DEFAULT_TOKENIZER = (
     ROOT
-    / "outputs/gear_transformer_sentencepiece_repeated"
+    / "outputs/gear_transformer/sentencepiece_repeated"
     / "shared_tokenizer_sentencepiece_bpe_repeated_v1.pt"
 )
 
