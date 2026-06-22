@@ -2,32 +2,46 @@
 .DS_Store
 .AppleDouble
 .LSOverride
+._*
+.Spotlight-V100
+.Trashes
 
 # Editors and local tool state
 .idea/
 .vscode/
+.history/
 *.swp
 *.swo
+*~
 .claude/
 
 # Local environment files
 .env
 .env.*
 !.env.example
+.direnv/
 
 # Python bytecode and caches
 __pycache__/
 *.py[cod]
 *$py.class
+.cache/
+.hypothesis/
 .pytest_cache/
 .mypy_cache/
+.dmypy.json
+dmypy.json
 .ruff_cache/
 .pyre/
+.pytype/
 .tox/
 .nox/
 .coverage
 .coverage.*
 htmlcov/
+coverage.xml
+junit.xml
+pytestdebug.log
 
 # Virtual environments
 .venv/
@@ -35,6 +49,7 @@ htmlcov/
 venv/
 env/
 ENV/
+__pypackages__/
 
 # Build and packaging outputs
 build/
@@ -42,6 +57,7 @@ dist/
 *.egg-info/
 *.egg
 .eggs/
+pip-wheel-metadata/
 
 # Notebook checkpoints
 .ipynb_checkpoints/
@@ -64,5 +80,7 @@ mlruns/
 
 # Logs and temp files
 *.log
+*.prof
+*.lprof
 *.tmp
 *.temp
