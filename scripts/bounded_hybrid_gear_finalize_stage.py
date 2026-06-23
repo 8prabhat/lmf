@@ -25,15 +25,31 @@ def parse_args() -> argparse.Namespace:
 
 
 def indexed_runs(report: dict, name: str) -> dict[int, dict]:
-    return {
-        int(run["seed"]): run for run in report["runs"][name]
-    }
+    runs = report["runs"][name]
+    indexed = {int(run["seed"]): run for run in runs}
+    if len(indexed) != len(runs):
+        raise ValueError(f"{name} contains duplicate seed results")
+    return indexed
 
 
 def main() -> None:
     args = parse_args()
     report = json.loads(args.results.read_text())
     v4 = indexed_runs(report, args.candidate)
+    expected_seeds = {int(seed) for seed in report.get("seeds", ())}
+    if len(expected_seeds) < 3:
+        raise ValueError("paired quality gates require at least three seeds")
+    for name in (
+        args.candidate,
+        "bounded_transformer",
+        "full_transformer",
+    ):
+        found = set(indexed_runs(report, name))
+        if found != expected_seeds:
+            raise ValueError(
+                f"{name} seed set {sorted(found)} does not match "
+                f"expected {sorted(expected_seeds)}"
+            )
     comparisons = {}
     for baseline in ("bounded_transformer", "full_transformer"):
         control = indexed_runs(report, baseline)

@@ -1,0 +1,101 @@
+# Spectral Memory (SM-LM) research program.
+#
+# Multi-Timescale Delta Memory (chunk-parallel, matmul-first) + Cross-Band
+# Interference Router, with a thin slice of sliding-window attention for exact
+# recall. PyTorch MPS first. See docs/spectral_memory/spectral_memory.md and the
+# technical spec for rationale.
+#
+# NOTE: the `data` block points at a paired-document manifest; set the roots to
+# your prepared corpus (mirror configs/pure_parallel_gear.yaml) before running.
+default_block: smoke
+
+base:
+  seed: 20262300
+  device: mps
+  precision: fp32  # fp32 for smoke/correctness; switch to bf16 once stable
+  data:
+    name: paired_document_manifest
+    manifest_root: outputs/spectral_memory/proxy/train_seed_20262300
+    seed: 20262300
+    wrap: true
+  model:
+    name: spectral_memory
+    dim: 512
+    layers: 8
+    banks: 4
+    head_dim: 64
+    attn_heads: 8
+    attention_layers: [4, 7]   # 1-2 sliding-window attention layers (0-indexed)
+    window: 256
+    chunk: 64
+    mlp_ratio: 2
+    router: sigmoid
+    min_half_life: 4.0
+    max_half_life: 2048.0
+    max_seq_len: 4096
+  trainer:
+    name: spectral_memory
+    betas: [0.9, 0.95]
+    weight_decay: 0.01
+    schedule_mode: tokens
+
+# Fast correctness / loss-descent check.
+smoke:
+  model:
+    vocab_size: 8192
+    dim: 256
+    layers: 4
+    banks: 3
+    head_dim: 48
+    attention_layers: [3]
+    window: 128
+    chunk: 32
+  trainer:
+    lr: 3.0e-3
+    total_training_tokens: 1000000
+    warmup_tokens: 100000
+  run:
+    seeds: 3
+    batch_size: 8
+    seq_len: 256
+
+# First serious generative prototype.
+prototype:
+  model:
+    vocab_size: 16000
+    dim: 512
+    layers: 8
+    banks: 4
+    head_dim: 64
+    attention_layers: [4, 7]
+    window: 256
+    chunk: 64
+  trainer:
+    lr: 1.0e-3
+    total_training_tokens: 60000000
+    warmup_tokens: 6000000
+  run:
+    seeds: 2
+    batch_size: 8
+    seq_len: 512
+
+# Larger local experiment (scale only after prototype works).
+larger:
+  model:
+    vocab_size: 32000
+    dim: 768
+    layers: 12
+    banks: 5
+    head_dim: 64
+    attention_layers: [4, 8, 11]
+    window: 512
+    chunk: 64
+    mlp_ratio: 3
+  trainer:
+    lr: 6.0e-4
+    total_training_tokens: 300000000
+    warmup_tokens: 30000000
+  run:
+    seeds: 2
+    batch_size: 4
+    seq_len: 1024

@@ -16,6 +16,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from ...core.registry import MODELS
+from ..bounded_hybrid_gear.scan import complex_mul
+from .segment_scan import broadcast_affine, gather_chunk_summary, local_token_scan
 
 
 class GearRMSNorm(nn.Module):
@@ -84,6 +86,16 @@ class PureParallelGearConfig:
     copy_gate_balance_weight: float = 0.02
     fast_weight_energy_weight: float = 1e-4
     fast_weight_energy_limit: float = 50.0
+    use_segment_scan: bool = True
+    future_horizons: tuple[int, ...] | None = None
+    future_aux_weight: float = 0.10
+    bank_settle_cadence: tuple[int, ...] | None = None
+    adaptive_settling_depth: bool = False
+    content_triggered_settling: bool = False
+    content_settle_threshold: float | None = None
+    content_settle_min_gap: int = 4
+    unify_memory_consolidation: bool = False
+    intra_sequence_gradient_clip: float = 50.0
 
     def __post_init__(self) -> None:
         if self.vocab_size < 2:
@@ -164,6 +176,82 @@ class PureParallelGearConfig:
                 raise ValueError("fast_weight_chunk_tokens must be at least 2")
             if not 0.0 < self.copy_gate_target_mean < 1.0:
                 raise ValueError("copy_gate_target_mean must be in (0, 1)")
+        if self.future_horizons is None:
+            # Slower banks (higher index, per the retention_low/high
+            # geometry above) predict further ahead -- one fixed token
+            # horizon per bank, geometrically spaced the same way the
+            # bounded_hybrid_gear sibling architecture's proven future-aux
+            # loss does (its default for 4 banks is exactly (4, 16, 64, 256)).
+            object.__setattr__(
+                self,
+                "future_horizons",
+                tuple(4 * 4**bank for bank in range(self.num_banks)),
+            )
+        else:
+            object.__setattr__(
+                self, "future_horizons", tuple(int(value) for value in self.future_horizons)
+            )
+        if len(self.future_horizons) != self.num_banks:
+            raise ValueError("future_horizons must contain one horizon per bank")
+        if any(horizon < 1 for horizon in self.future_horizons):
+            raise ValueError("future_horizons must all be positive")
+        if self.future_aux_weight < 0.0:
+            raise ValueError("future_aux_weight must be non-negative")
+        if self.bank_settle_cadence is None:
+            # Defaults to every bank settling on every real sentence
+            # boundary -- identical to pre-Phase-3.2 behavior -- since,
+            # unlike future_horizons above, this changes settle()'s actual
+            # numeric output (which banks mix this event), not just an
+            # additive training-only loss term. Per this project's own
+            # standard (no quality claim ships without a paired ablation),
+            # a non-trivial cadence is opt-in via explicit config, not a
+            # silent default change.
+            object.__setattr__(
+                self, "bank_settle_cadence", tuple(1 for _ in range(self.num_banks))
+            )
+        else:
+            object.__setattr__(
+                self,
+                "bank_settle_cadence",
+                tuple(int(value) for value in self.bank_settle_cadence),
+            )
+        if len(self.bank_settle_cadence) != self.num_banks:
+            raise ValueError("bank_settle_cadence must contain one cadence per bank")
+        if any(cadence < 1 for cadence in self.bank_settle_cadence):
+            raise ValueError("bank_settle_cadence must all be positive")
+        if self.content_settle_threshold is None:
+            # A fixed absolute default here (the original implementation
+            # used 0.5) is disconnected from clutch_target_mean, the knob
+            # that actually sets clutch's calibrated center -- found via a
+            # real ablation run: with the project's default
+            # clutch_target_mean=0.35 and clutch_collapse only guarding
+            # against the [0.05, 0.95] saturation extremes (nothing pulls
+            # clutch up specifically), a real 320K-token training run
+            # never produced a single token above 0.43, so a 0.5 threshold
+            # was structurally unreachable -- not merely undertrained. The
+            # opposite failure mode is just as real: a config with
+            # clutch_target_mean=0.6 would have made a fixed 0.5 threshold
+            # fire on the *majority* of tokens by default. Deriving the
+            # default from clutch_target_mean fixes both directions at
+            # once; the margin (capped at half the remaining headroom to
+            # 1.0) is a deliberately modest, clearly-named constant, not a
+            # value validated by its own paired ablation yet.
+            object.__setattr__(
+                self,
+                "content_settle_threshold",
+                self.clutch_target_mean
+                + min(0.10, 0.5 * (1.0 - self.clutch_target_mean)),
+            )
+        if not 0.0 < self.content_settle_threshold < 1.0:
+            raise ValueError("content_settle_threshold must be in (0, 1)")
+        if self.content_settle_threshold <= self.clutch_target_mean:
+            raise ValueError(
+                "content_settle_threshold must exceed clutch_target_mean"
+            )
+        if self.content_settle_min_gap < 1:
+            raise ValueError("content_settle_min_gap must be at least 1")
+        if self.intra_sequence_gradient_clip <= 0.0:
+            raise ValueError("intra_sequence_gradient_clip must be positive")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -178,6 +266,19 @@ class GearState:
     load: torch.Tensor
     sentence_length: torch.Tensor
     segment_id: torch.Tensor
+    # Count of real sentence boundaries (not micro_clutch firings) seen so
+    # far, per row -- read by settle() to gate gear-ratio multi-rate bank
+    # settling (Phase 3.2: bank_settle_cadence). Optional, defaulting to
+    # None (= no cadence gating, every bank always active, identical to
+    # pre-Phase-3.2 behavior) so every pre-existing call site that builds a
+    # GearState without it -- test legacy references, _state_row,
+    # settle()'s own boundary_state placeholders elsewhere -- keeps working
+    # unchanged. Device-resident (unlike sentence_length/segment_id, which
+    # are deliberately CPU for _chunk_plan's Python bookkeeping) since it
+    # only ever feeds a device-side per-bank mask inside settle(), called
+    # once per chunk-step/round -- forcing a CPU<->device sync there would
+    # reintroduce exactly the dispatch overhead Phase 1/2 removed.
+    boundary_count: torch.Tensor | None = None
 
     def detach(self) -> "GearState":
         return GearState(
@@ -186,6 +287,7 @@ class GearState:
             self.load.detach(),
             self.sentence_length.detach(),
             self.segment_id.detach(),
+            self.boundary_count.detach() if self.boundary_count is not None else None,
         )
 
     def to(self, *args, **kwargs) -> "GearState":
@@ -196,6 +298,11 @@ class GearState:
             self.load.to(*args, **kwargs),
             self.sentence_length.cpu(),
             self.segment_id.cpu(),
+            (
+                self.boundary_count.to(*args, **kwargs)
+                if self.boundary_count is not None
+                else None
+            ),
         )
 
 
@@ -266,14 +373,18 @@ class _ChunkSpec:
 class _MemoryChunkSpec:
     """One safety-capped span within a single row, found by
     FastWeightMemory._memory_chunk_plan. Unlike _ChunkSpec, this never
-    breaks at sentence ends or the intra-sentence clutch interval -- the
-    memory is meant to persist across sentences within a document, only
-    resetting at segment (document) changes."""
+    breaks at the intra-sentence clutch interval, and only breaks at
+    sentence ends (`boundary`) when config.unify_memory_consolidation is
+    on (Phase 3.5) -- the memory is meant to persist across sentences
+    within a document by default, only resetting at segment (document)
+    changes; `boundary` additionally marks a forced split (not a reset)
+    at a sentence end, the point where the consolidation gate applies."""
 
     start: int
     stop: int
     needs_reset: bool
     segment: int
+    boundary: bool = False
 
 
 class PureGearLayer(nn.Module):
@@ -353,6 +464,26 @@ class PureGearLayer(nn.Module):
             retention_high[:, None, None],
             persistent=True,
         )
+        # config.bank_settle_cadence is defined relative to the main gear
+        # stack's banks (config.num_banks); the predictor layer (banks=1,
+        # see __init__'s `banks` override) is a separate short-horizon
+        # integrator, not one of those timescale banks, so it always gets
+        # an unconditional (cadence=1) buffer regardless of config.
+        cadence = (
+            config.bank_settle_cadence
+            if self.banks == config.num_banks
+            else tuple(1 for _ in range(self.banks))
+        )
+        self.register_buffer(
+            "_bank_settle_cadence",
+            torch.tensor(cadence, dtype=torch.long),
+            persistent=False,
+        )
+        # Static fact about config, not data -- lets settle() skip
+        # computing/applying the cadence mask entirely in the (default)
+        # all-1s case, so opting out of Phase 3.2 costs nothing, not even
+        # an extra elementwise compare-and-where per round.
+        self._has_bank_cadence = any(value != 1 for value in cadence)
 
         phase = torch.zeros(self.banks, self.gears, self.channels)
         for bank in range(self.banks):
@@ -475,6 +606,19 @@ class PureGearLayer(nn.Module):
                     self.banks, self.gears, self.channels, 2
                 ),
             )
+        # Phase 3.3: soft per-bank gate deciding how many of settle()'s
+        # rounds k>=1 actually take effect for a given settle event, based
+        # on that bank's rotor energy at entry -- registered as a Parameter
+        # only when actually used (config.adaptive_settling_depth), mirroring
+        # intra_gate/cross_gate/load_response/omega_response's own
+        # conditional-Parameter-vs-buffer pattern above, so a disabled
+        # (default) layer carries zero extra trainable parameters for this.
+        if config.boundary_settling and config.adaptive_settling_depth:
+            self.depth_response = nn.Parameter(torch.ones(self.banks))
+            self.depth_threshold = nn.Parameter(torch.ones(self.banks))
+        else:
+            self.register_buffer("depth_response", torch.ones(self.banks))
+            self.register_buffer("depth_threshold", torch.ones(self.banks))
 
         feature_dim = self._feature_dim()
         self.readout_norm = GearRMSNorm(feature_dim)
@@ -540,6 +684,7 @@ class PureGearLayer(nn.Module):
             load.to(device),
             torch.zeros(batch, dtype=torch.long),
             torch.full((batch,), -1, dtype=torch.long),
+            torch.zeros(batch, dtype=torch.long, device=device),
         )
 
     def _project_token_controls(
@@ -672,12 +817,24 @@ class PureGearLayer(nn.Module):
         lefts: torch.Tensor,
         rights: torch.Tensor,
         gate: torch.Tensor,
+        active: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Vectorized _mix_gears over a batch of mutually-disjoint pairs.
 
         lefts/rights index distinct, non-overlapping gear positions, so all
         pairs can be mixed in one shot instead of one _mix_gears call per
         pair -- this is the loop that dominated settle()'s cost.
+
+        `active` ([rows, banks], bool), when given, is this round's
+        gear-ratio cadence mask (Phase 3.2): a False entry means that
+        bank does not settle this event at all, for this row, so it must
+        come out exactly as it went in -- not just skip this specific
+        pair-mixing op, but be fully unaffected. `activity`'s computation
+        deliberately ignores this mask: it measures the learned gate's
+        raw propensity to mix (a quantity training_step regularizes
+        against collapsing to zero), not this event's actual realized
+        effect, since bank_settle_cadence is a fixed structural schedule,
+        not something the gate itself ever decides.
         """
         a = rotor.index_select(2, lefts)
         b = rotor.index_select(2, rights)
@@ -702,7 +859,12 @@ class PureGearLayer(nn.Module):
         cosine, sine = angle.cos()[..., None], angle.sin()[..., None]
         new_a = cosine * a - sine * b
         new_b = sine * a + cosine * b
-        rotor = rotor.index_copy(2, lefts, new_a).index_copy(2, rights, new_b)
+        mixed = rotor.index_copy(2, lefts, new_a).index_copy(2, rights, new_b)
+        rotor = (
+            torch.where(active[:, :, None, None, None], mixed, rotor)
+            if active is not None
+            else mixed
+        )
         # sigmoid(gate).mean() averages over (banks, pairs, channels); the
         # original loop summed one mean() per pair, so rescale by pair count
         # to match (each pair contributes equally many banks*channels terms).
@@ -717,7 +879,13 @@ class PureGearLayer(nn.Module):
         left: int,
         right: int,
         gate: torch.Tensor,
+        active: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        """`active` ([rows, banks], bool), when given, is this round's
+        gear-ratio cadence mask (Phase 3.2): this (left, right) pair only
+        mixes for a row where *both* banks are active this event -- a bank
+        not engaging this cycle can't be meshed with by its neighbor
+        either, exactly like a disengaged gear in a real gear train."""
         a, b = rotor[:, left], rotor[:, right]
         features = torch.cat(
             (
@@ -738,10 +906,56 @@ class PureGearLayer(nn.Module):
             * torch.tanh(raw)
         )
         cosine, sine = angle.cos()[..., None], angle.sin()[..., None]
-        values = [rotor[:, index] for index in range(self.banks)]
-        values[left] = cosine * a - sine * b
-        values[right] = sine * a + cosine * b
-        return torch.stack(values, dim=1)
+        new_a = cosine * a - sine * b
+        new_b = sine * a + cosine * b
+        if active is not None:
+            pair_active = (active[:, left] & active[:, right])[:, None, None, None]
+            new_a = torch.where(pair_active, new_a, a)
+            new_b = torch.where(pair_active, new_b, b)
+        # This ring step only ever touches 2 of `banks` bank slots; the prior
+        # rebuild-the-whole-list-then-restack pattern paid an O(banks)
+        # tensor-copy cost on every one of the ring's `banks` sequential
+        # steps (O(banks^2) total) just to change 2 entries. A targeted
+        # index_copy touches only those 2 slots, bit-exact, same sequential
+        # dependency (still settle()'s only non-vectorized loop -- the ring
+        # is a true data dependency: consecutive pairs share an endpoint, so
+        # it cannot be split into disjoint passes the way the intra-bank
+        # gear pairs were without changing settle()'s numeric output).
+        index = torch.tensor([left, right], device=rotor.device)
+        update = torch.stack((new_a, new_b), dim=1)
+        return rotor.index_copy(1, index, update)
+
+    def _bank_active(self, boundary_count: torch.Tensor | None) -> torch.Tensor | None:
+        """Gear-ratio cadence mask (Phase 3.2), [rows, banks] bool: True
+        where a bank settles this event for that row. None whenever
+        there's nothing to gate -- either bank_settle_cadence is the
+        default all-1s (every bank, every event) or the caller didn't
+        supply a real boundary_count -- so callers can treat None as
+        "every bank always active" and skip masking entirely."""
+        if not self._has_bank_cadence or boundary_count is None:
+            return None
+        return (boundary_count[:, None] % self._bank_settle_cadence[None, :]) == 0
+
+    def _round_depth_gate(
+        self, log_energy_entry: torch.Tensor | None, round_index: int
+    ) -> torch.Tensor | None:
+        """Soft per-(row, bank) continuation weight for settle() round
+        `round_index` (Phase 3.3), in [0, 1]: how much of *this* round's
+        mixing actually counts, versus reverting to the rotor as it stood
+        before this round. Round 0 always fully counts (every settle event
+        gets at least one full round, unconditionally) -- only k>=1 are
+        gated, and the threshold `depth_threshold[bank] * round_index`
+        rises with k, so each additional round needs progressively more
+        rotor energy at entry to justify itself. None when there's nothing
+        to gate (feature disabled or round 0), matching _bank_active's
+        convention so callers can skip the blend entirely.
+        """
+        if not self.config.adaptive_settling_depth or round_index == 0:
+            return None
+        return torch.sigmoid(
+            self.depth_response[None] * log_energy_entry
+            - self.depth_threshold[None] * round_index
+        )
 
     def settle(
         self,
@@ -752,8 +966,19 @@ class PureGearLayer(nn.Module):
         use_load: bool = True,
     ) -> tuple[GearState, torch.Tensor]:
         rotor = state.rotor
+        active = self._bank_active(state.boundary_count)
+        log_energy_entry = (
+            # [rows, banks] -- averaged over gears/channels, since the
+            # depth gate is a per-bank decision (one "is this boundary
+            # information-dense" signal per bank), not a per-gear one.
+            rotor.square().sum(dim=-1).clamp_min(1e-8).sqrt().log().clamp(-4.0, 4.0)
+            .mean(dim=(2, 3))
+            if self.config.adaptive_settling_depth
+            else None
+        )
         activity = rotor.new_zeros(())
         for round_index in range(self.config.settling_rounds):
+            rotor_before_round = rotor
             gate_round = min(round_index, self.intra_gate.shape[0] - 1)
             if self._even_gear_lefts.numel() > 0:
                 rotor, pair_activity = self._mix_gear_pairs(
@@ -763,6 +988,7 @@ class PureGearLayer(nn.Module):
                     self._even_gear_lefts,
                     self._even_gear_rights,
                     self.intra_gate[gate_round, :, self._even_gear_lefts],
+                    active,
                 )
                 activity = activity + pair_activity
             if not commuting_only and self._odd_gear_lefts.numel() > 0:
@@ -773,6 +999,7 @@ class PureGearLayer(nn.Module):
                     self._odd_gear_lefts,
                     self._odd_gear_rights,
                     self.intra_gate[gate_round, :, self._odd_gear_lefts],
+                    active,
                 )
                 activity = activity + pair_activity
             if cross_bank and self.banks > 1:
@@ -785,10 +1012,15 @@ class PureGearLayer(nn.Module):
                         left,
                         right,
                         self.cross_gate[gate_round, left],
+                        active,
                     )
                     activity = activity + torch.sigmoid(
                         self.cross_gate[gate_round, left]
                     ).mean()
+            depth_gate = self._round_depth_gate(log_energy_entry, round_index)
+            if depth_gate is not None:
+                weight = depth_gate[:, :, None, None, None]
+                rotor = weight * rotor + (1.0 - weight) * rotor_before_round
 
         magnitude = rotor.square().sum(dim=-1).clamp_min(1e-8).sqrt()
         log_energy = magnitude.log().clamp(-4.0, 4.0)
@@ -816,6 +1048,17 @@ class PureGearLayer(nn.Module):
             if self.config.learned_angular_velocity
             else state.omega
         )
+        if active is not None:
+            # A bank inactive this event is fully unaffected by it -- not
+            # just unmixed (already guaranteed by the per-round masking
+            # above) but also no load/omega update, exactly like a
+            # disengaged gear that simply isn't turning this cycle.
+            bank_active = active[:, :, None, None]
+            bounded_rotor = torch.where(
+                bank_active[..., None], bounded_rotor, state.rotor
+            )
+            load = torch.where(bank_active, load, state.load)
+            omega = torch.where(bank_active, omega, state.omega)
         count = max(1, self.config.settling_rounds)
         return (
             GearState(
@@ -824,6 +1067,7 @@ class PureGearLayer(nn.Module):
                 load,
                 torch.zeros_like(state.sentence_length),
                 state.segment_id,
+                state.boundary_count,
             ),
             activity / count,
         )
@@ -887,6 +1131,39 @@ class PureGearLayer(nn.Module):
             state.segment_id[row : row + 1],
         )
 
+    def _content_trigger(
+        self, clutch_controls: torch.Tensor
+    ) -> torch.Tensor | None:
+        """Phase 3.4: per-token boolean ([batch, length], CPU), True where
+        the already-learned clutch signal alone -- averaged over banks/
+        gears/channels, then thresholded -- is high enough to force a
+        settle here, independent of sentence_end_mask. None when the
+        feature is off, matching the rest of this file's "None means no
+        gating" convention.
+
+        This is a deterministic function of an already-learned signal
+        (clutch_controls, trained via its existing uses: torque gating
+        plus the clutch_collapse/clutch_balance regularizers in
+        training_step), not a directly gradient-trained trigger -- a hard
+        threshold comparison has no useful gradient w.r.t. either operand,
+        and chunk-plan's downstream consumer is Python-level integer
+        indexing, not a differentiable tensor op, so there is nowhere for
+        a straight-through-style gradient on the trigger itself to flow
+        to. Making the trigger *decision* genuinely learned via gradient
+        descent would need every token to be a soft, blended settle point
+        (the way Phase 3.3 blends settle() rounds), which would undo the
+        chunked/discrete structure Phases 1-2 spent their effort
+        vectorizing -- out of scope here.
+        """
+        if not self.config.content_triggered_settling:
+            return None
+        mean_clutch = clutch_controls.mean(dim=(2, 3, 4))
+        return (
+            (mean_clutch > self.config.content_settle_threshold)
+            .detach()
+            .to(device="cpu", dtype=torch.bool)
+        )
+
     def _chunk_plan(
         self,
         token_mask_row: torch.Tensor,
@@ -894,6 +1171,7 @@ class PureGearLayer(nn.Module):
         sentence_end_mask_row: torch.Tensor,
         initial_segment: int,
         initial_sentence_length: int,
+        content_trigger_row: torch.Tensor | None = None,
     ) -> tuple[list[_ChunkSpec], list[int]]:
         """Find one row's sentence/clutch spans without touching any tensor
         math -- pure Python/CPU bookkeeping so forward() can batch every
@@ -901,6 +1179,14 @@ class PureGearLayer(nn.Module):
 
         Mirrors the boundary conditions that used to be interleaved with
         tensor processing in the per-row loop, unchanged.
+
+        `content_trigger_row` (Phase 3.4, optional, [length] bool), when
+        given, marks positions where the already-learned clutch signal
+        alone (mean over banks/gears/channels, thresholded by
+        config.content_settle_threshold) is enough to force a boundary
+        here -- independent of `sentence_end_mask_row`. None (the default,
+        also what's passed when content_triggered_settling is off) means
+        no extra triggering, identical to pre-Phase-3.4 behavior.
         """
         length = int(token_mask_row.shape[0])
         chunks: list[_ChunkSpec] = []
@@ -908,6 +1194,7 @@ class PureGearLayer(nn.Module):
         position = 0
         current_segment = initial_segment
         sentence_length = initial_sentence_length
+        min_gap = self.config.content_settle_min_gap
         while position < length:
             if not bool(token_mask_row[position]):
                 zero_positions.append(position)
@@ -940,6 +1227,19 @@ class PureGearLayer(nn.Module):
                     stop = candidate
                     break
                 if bool(sentence_end_mask_row[candidate]):
+                    stop = candidate + 1
+                    boundary = True
+                    break
+                # content-triggered settling (Phase 3.4): the min_gap floor
+                # bounds worst-case chunk count regardless of how the
+                # learned clutch signal happens to behave (e.g. before it's
+                # well-trained), the same role intra_sentence_clutch_tokens
+                # already plays against the fixed micro_clutch cadence.
+                if (
+                    content_trigger_row is not None
+                    and candidate - position + 1 >= min_gap
+                    and bool(content_trigger_row[candidate])
+                ):
                     stop = candidate + 1
                     boundary = True
                     break
@@ -977,6 +1277,99 @@ class PureGearLayer(nn.Module):
             torch.cat([state.segment_id for state in states], dim=0),
         )
 
+    def _clip_recurrent_gradient(self, tensor: torch.Tensor) -> torch.Tensor:
+        """Bound the gradient crossing a chunk-step boundary in the carried
+        rotor/omega/load state, without touching the forward value at all.
+
+        Found via direct empirical debugging: a real (lr=3e-3, long-context)
+        training run produced a non-finite *combined* gradient norm even
+        though every individual chunk's forward rotor value stayed small and
+        finite throughout (confirmed by instrumenting every
+        `_scan_token_dynamics` call in the crashing step: 696 chunk-steps
+        chained together, max chunk length 32, forward rotor magnitudes
+        ~1-1.6 the whole way through). That rules out a single-chunk forward
+        overflow -- the failure is purely a backward-pass phenomenon: a per-
+        chunk-step gradient gain only slightly above 1 (from a settle()
+        Jacobian pushed there by an aggressive learning rate) compounds
+        multiplicatively across hundreds of sequential chunk-steps within
+        one training step's backward pass, the textbook exploding-gradient-
+        through-depth failure mode for any long recurrence. The existing
+        `gradient_explosion_threshold` clipping in the trainer can't prevent
+        this: it only inspects the *combined* norm after backward finishes,
+        by which point the sum-of-squares in that computation has already
+        overflowed float32. This hook clips the gradient at the one point
+        that actually matters -- where it crosses from one chunk-step's
+        state into the next -- the same place a textbook truncated-BPTT
+        gradient clip would sit, so a runaway gain can never compound past
+        this bound regardless of how many chunk-steps end up chained.
+
+        A no-op by construction whenever the gradient is already finite and
+        below the threshold (the case for every existing test and every
+        healthy training step observed in this project), so this changes
+        nothing about well-behaved training -- it only engages in exactly
+        the pathological regime that would otherwise hard-crash.
+
+        Clips per row, on RMS (per-element magnitude within that row) --
+        not the raw combined L2 norm over the whole tensor, and not jointly
+        across rows -- for two reasons found via real test failures:
+        1. A small test model (2 banks x 4 gears x 2 channels, batch 3) hit
+           a perfectly legitimate combined norm of ~58 under a gradient-
+           amplifying `.square().sum()` test loss, well past a threshold
+           picked by eyeballing only the full-scale real-corpus model's
+           norm. The combined L2 norm grows with element count (batch x
+           banks x gears x channels), which varies a lot across configs/
+           tests and has nothing to do with whether any individual value
+           is actually dangerous; RMS does not have that artifact.
+        2. `_forward_batched` calls this once per chunk-step on a tensor
+           covering every row active that step, batched together, while
+           the test suite's legacy reference implementations process one
+           row at a time -- so clipping jointly across whichever rows
+           happen to be batched together would make the result depend on
+           batching, not just on each row's own gradient. Per-row keeps it
+           identical to clipping each row in total isolation, regardless
+           of which other rows are processed alongside it.
+        """
+        if not tensor.requires_grad:
+            return tensor
+        threshold = self.config.intra_sequence_gradient_clip
+
+        def _hook(grad: torch.Tensor) -> torch.Tensor:
+            flat = grad.reshape(grad.shape[0], -1)
+            finite_row = torch.isfinite(flat).all(dim=1)
+            # Already corrupted by the time it reached this boundary for
+            # that row -- rescaling a non-finite row can't recover a
+            # meaningful direction, so drop just that row's contribution
+            # rather than propagate the corruption further upstream.
+            safe_flat = torch.where(
+                finite_row[:, None], flat, torch.zeros_like(flat)
+            )
+            # Found via direct debugging: naive pow(2).mean().sqrt() on a
+            # row whose elements are individually finite but large (this
+            # is exactly the regime this hook exists to catch) can square
+            # past float32's ~3.4e38 ceiling and overflow *its own*
+            # intermediate computation to inf -- which then makes
+            # `threshold / rms` evaluate to exactly 0.0, silently zeroing
+            # the entire row's gradient instead of rescaling it (confirmed
+            # as the real mechanism behind an "exactly 0.0 grad_norm"
+            # training stall: the elements never tripped the finite_row
+            # check above, since they were finite before squaring).
+            # Scaling by each row's own max-abs value before squaring -- a
+            # standard numerically-stable norm technique -- keeps the
+            # squared term in [0, 1] regardless of the input's raw
+            # magnitude, so this can no longer overflow no matter how
+            # large (short of already being non-finite) the gradient is.
+            row_max = safe_flat.abs().amax(dim=1, keepdim=True).clamp_min(1e-30)
+            rms = (safe_flat / row_max).pow(2).mean(dim=1).sqrt() * row_max.squeeze(1)
+            factor = torch.where(
+                rms > threshold,
+                threshold / rms.clamp_min(1e-30),
+                torch.ones_like(rms),
+            )
+            return (safe_flat * factor[:, None]).reshape(grad.shape)
+
+        tensor.register_hook(_hook)
+        return tensor
+
     def _forward_batched(
         self,
         hidden: torch.Tensor,
@@ -991,55 +1384,69 @@ class PureGearLayer(nn.Module):
         commuting_only: bool,
         use_load: bool,
     ) -> tuple[torch.Tensor, GearState, dict[str, torch.Tensor]]:
-        """Batch every row's chunk processing per chunk-step instead of
-        looping row by row and chunk by chunk.
+        """Batch every row's chunk processing per chunk-step, and -- within
+        a chunk-step -- gather/scatter every active row's slice with one
+        vectorized indexing op instead of a Python loop over active rows.
 
-        Chunk boundaries are content-dependent, so finding them stays a
-        (tensor-free, near-free) Python pass per row via _chunk_plan. The
-        expensive rotor math runs once per chunk-step across every row that
-        still has a chunk at that step, instead of once per row per chunk --
-        this is what makes both CPU loop overhead and MPS kernel-launch
-        overhead drop roughly batch_size-fold.
+        Chunk *boundaries* are still found by the per-row Python
+        `_chunk_plan` pass (content-dependent; not yet vectorized -- see its
+        docstring). What this method avoids is launching one small device
+        kernel per active row per chunk-step to slice rows in and out of the
+        step's working tensors: on MPS/CUDA, O(max_chunks * batch) tiny
+        sequential launches per layer per training step is where wall-clock
+        time actually went, far more than the Python bookkeeping itself.
 
-        _scan_token_dynamics needs no change at all: its cumsum is along
-        dim=0 only, so adding an extra "which row" dimension after it (delta
-        shaped [T, rows, banks, gears, channels] instead of [T, banks, gears,
-        channels]) keeps every row's cumulative sum independent via ordinary
-        broadcasting. settle() and _mix_gear_pairs/_mix_banks already accept
-        an arbitrary leading dim (no time axis there at all). Only _readout
-        hardcodes dim=1/dim=2 as banks/gears, so its calls are flattened to
-        [T*rows, banks, gears, channels, 2] and reshaped back afterward.
+        rotor_energy/clutch/retention in the returned record are pure
+        per-token regularizer inputs consumed only via `.mean()` over all
+        valid tokens (see training_step) -- never zipped against a specific
+        token's position -- so collecting them as one flat, order-agnostic
+        list per layer (rather than the original's per-row-then-concatenate
+        order) is exactly equivalent for every consumer. `output` and
+        `next_state` are not order-agnostic and are written to their exact
+        (row, position) / (row,) destinations via masked scatter.
         """
         device = hidden.device
         batch, length = hidden.shape[0], hidden.shape[1]
         delta, clutch_controls, torque, retention_controls = (
             self._project_token_controls(hidden)
         )
+        content_trigger = self._content_trigger(clutch_controls)
 
         plans: list[list[_ChunkSpec]] = []
-        zero_lists: list[list[int]] = []
         for row in range(batch):
-            chunks, zeros = self._chunk_plan(
+            chunks, _zeros = self._chunk_plan(
                 token_mask[row],
                 segment_ids[row],
                 sentence_end_mask[row],
                 int(state.segment_id[row].item()),
                 int(state.sentence_length[row].item()),
+                content_trigger[row] if content_trigger is not None else None,
             )
             plans.append(chunks)
-            zero_lists.append(zeros)
 
         output = hidden.new_zeros(batch, length, self.dim)
-        row_states = [self._state_row(state, row) for row in range(batch)]
-        row_rotor_energy: list[list[torch.Tensor]] = [[] for _ in range(batch)]
-        row_clutch: list[list[torch.Tensor]] = [[] for _ in range(batch)]
-        row_retention: list[list[torch.Tensor]] = [[] for _ in range(batch)]
-        # The legacy per-row loop takes a per-row mean of that row's own
-        # settle() couplings (defaulting to zero for a row that never
-        # settles, e.g. fully masked), then means *those* across rows --
-        # not a flat mean over every settle() call. Mirror that exactly so
-        # a row with zero settles dilutes the aggregate the same way.
+        fresh = self.initial_state(1, device)
+        fresh_rotor, fresh_omega, fresh_load = (
+            fresh.rotor[0], fresh.omega[0], fresh.load[0]
+        )
+
+        current_rotor = state.rotor.clone()
+        current_omega = state.omega.clone()
+        current_load = state.load.clone()
+        current_sentence_length = state.sentence_length.clone()
+        current_segment_id = state.segment_id.clone()
+        current_boundary_count = (
+            state.boundary_count.clone() if state.boundary_count is not None else None
+        )
+
+        energy_parts: list[torch.Tensor] = []
+        clutch_parts: list[torch.Tensor] = []
+        retention_parts: list[torch.Tensor] = []
         row_coupling: list[list[torch.Tensor]] = [[] for _ in range(batch)]
+        settle_row_parts: list[torch.Tensor] = []
+        settle_position_parts: list[torch.Tensor] = []
+        settle_segment_parts: list[torch.Tensor] = []
+        settle_rotor_parts: list[torch.Tensor] = []
 
         max_chunks = max((len(plan) for plan in plans), default=0)
         for step in range(max_chunks):
@@ -1048,43 +1455,84 @@ class PureGearLayer(nn.Module):
             num_active = len(active_rows)
             step_max_len = max(spec.stop - spec.start for spec in specs)
 
-            delta_step = delta.new_zeros(
-                step_max_len, num_active, self.banks, self.gears, self.channels
+            chunk_len_list = [spec.stop - spec.start for spec in specs]
+            # One combined host->device transfer instead of four separate
+            # torch.tensor(..., device=device) calls -- each pays its own
+            # CPU-staging + dispatch cost, a fixed per-step overhead that
+            # doesn't shrink with batch size and so dominates disproportion-
+            # ately at small batch (measured: this loop is net slower than
+            # the pre-vectorization per-row Python loop at batch=4, even
+            # though it wins decisively at batch>=32).
+            combined = torch.tensor(
+                [
+                    (
+                        spec.stop - spec.start,
+                        spec.start,
+                        int(spec.needs_reset),
+                        row,
+                        int(spec.boundary),
+                    )
+                    for row, spec in zip(active_rows, specs)
+                ],
+                device=device,
+                dtype=torch.long,
             )
-            torque_step = torque.new_zeros(
-                step_max_len, num_active, self.banks, self.gears, self.channels, 2
+            chunk_lens = combined[:, 0]
+            starts = combined[:, 1]
+            needs_reset_t = combined[:, 2].bool()
+            rows_t = combined[:, 3]
+            boundary_t_device = combined[:, 4].bool()
+            # CPU-only siblings, built straight from the Python lists rather
+            # than via chunk_lens.cpu()/rows_t.cpu() -- the latter would
+            # force a device->host sync waiting on the transfer above.
+            chunk_lens_cpu = torch.tensor(chunk_len_list, dtype=torch.long)
+            rows_t_cpu = torch.tensor(active_rows, dtype=torch.long)
+            boundary_t = torch.tensor(
+                [spec.boundary for spec in specs], dtype=torch.bool
             )
-            retention_step = retention_controls.new_ones(
-                step_max_len, num_active, self.banks, self.gears, self.channels
+            segment_t = torch.tensor(
+                [spec.segment for spec in specs], dtype=torch.long
             )
-            clutch_step = clutch_controls.new_zeros(
-                step_max_len, num_active, self.banks, self.gears, self.channels
+            sentence_length_before_t = torch.tensor(
+                [spec.sentence_length_before for spec in specs], dtype=torch.long
             )
-            rotor_in = hidden.new_zeros(
-                num_active, self.banks, self.gears, self.channels, 2
-            )
-            omega_in = hidden.new_zeros(num_active, self.banks, self.gears, self.channels)
-            load_in = hidden.new_zeros(num_active, self.banks, self.gears, self.channels)
 
-            for index, row in enumerate(active_rows):
-                spec = specs[index]
-                chunk_len = spec.stop - spec.start
-                delta_step[:chunk_len, index] = delta[row, spec.start : spec.stop]
-                torque_step[:chunk_len, index] = torque[row, spec.start : spec.stop]
-                retention_step[:chunk_len, index] = retention_controls[
-                    row, spec.start : spec.stop
-                ]
-                clutch_step[:chunk_len, index] = clutch_controls[
-                    row, spec.start : spec.stop
-                ]
-                if spec.needs_reset:
-                    fresh = self.initial_state(1, device)
-                    fresh.segment_id.fill_(spec.segment)
-                    row_states[row] = fresh
-                row_state = row_states[row]
-                rotor_in[index] = row_state.rotor[0]
-                omega_in[index] = row_state.omega[0]
-                load_in[index] = row_state.load[0]
+            time_offsets = torch.arange(step_max_len, device=device)
+            valid = time_offsets[:, None] < chunk_lens[None, :]  # [T, A]
+            positions = (starts[None, :] + time_offsets[:, None]).clamp(
+                0, length - 1
+            )
+            gather_rows = rows_t[None, :].expand(step_max_len, -1)
+
+            def _gather(source: torch.Tensor, fill: float) -> torch.Tensor:
+                gathered = source[gather_rows, positions]
+                extra = source.dim() - 2
+                mask = valid.reshape(*valid.shape, *([1] * extra))
+                return torch.where(mask, gathered, torch.full_like(gathered, fill))
+
+            delta_step = _gather(delta, 0.0)
+            torque_step = _gather(torque, 0.0)
+            retention_step = _gather(retention_controls, 1.0)
+            clutch_step = _gather(clutch_controls, 0.0)
+
+            reset_mask = needs_reset_t[:, None, None, None]
+            rotor_in = torch.where(
+                reset_mask[..., None].expand(
+                    -1, self.banks, self.gears, self.channels, 2
+                ),
+                fresh_rotor[None].expand(num_active, -1, -1, -1, -1),
+                current_rotor.index_select(0, rows_t),
+            )
+            omega_in = torch.where(
+                reset_mask.expand(-1, self.banks, self.gears, self.channels),
+                fresh_omega[None].expand(num_active, -1, -1, -1),
+                current_omega.index_select(0, rows_t),
+            )
+            load_in = torch.where(
+                reset_mask.expand(-1, self.banks, self.gears, self.channels),
+                fresh_load[None].expand(num_active, -1, -1, -1),
+                current_load.index_select(0, rows_t),
+            )
 
             scan_state = GearState(
                 rotor_in,
@@ -1123,6 +1571,13 @@ class PureGearLayer(nn.Module):
                         load_in.index_select(0, gather_index),
                         hidden.new_zeros(len(settle_indices), dtype=torch.long),
                         hidden.new_zeros(len(settle_indices), dtype=torch.long),
+                        (
+                            current_boundary_count.index_select(0, rows_t).index_select(
+                                0, gather_index
+                            )
+                            if current_boundary_count is not None
+                            else None
+                        ),
                     )
                     settled_state, coupling = self.settle(
                         boundary_state,
@@ -1136,6 +1591,28 @@ class PureGearLayer(nn.Module):
                     rotor_step = rotor_step.index_put(put_index, settled_state.rotor)
                     omega_step = omega_step.index_put(put_index, settled_state.omega)
                     load_step = load_step.index_put(put_index, settled_state.load)
+                    settle_row_parts.append(
+                        torch.tensor(
+                            [active_rows[index] for index in settle_indices],
+                            dtype=torch.long,
+                            device=device,
+                        )
+                    )
+                    settle_position_parts.append(
+                        torch.tensor(
+                            [specs[index].stop - 1 for index in settle_indices],
+                            dtype=torch.long,
+                            device=device,
+                        )
+                    )
+                    settle_segment_parts.append(
+                        torch.tensor(
+                            [specs[index].segment for index in settle_indices],
+                            dtype=torch.long,
+                            device=device,
+                        )
+                    )
+                    settle_rotor_parts.append(settled_state.rotor)
 
             output_step = self._readout(
                 rotor_step.reshape(
@@ -1155,56 +1632,81 @@ class PureGearLayer(nn.Module):
                 ),
             ).reshape(step_max_len, num_active, self.dim)
 
-            for index, row in enumerate(active_rows):
-                spec = specs[index]
-                chunk_len = spec.stop - spec.start
-                last = chunk_len - 1
-                output[row, spec.start : spec.stop] = output_step[:chunk_len, index]
-                row_rotor_energy[row].append(
-                    rotor_step[:chunk_len, index].square().sum(dim=-1)
-                )
-                row_clutch[row].append(clutch_step[:chunk_len, index])
-                row_retention[row].append(retention_step[:chunk_len, index])
+            flat_valid = valid.reshape(-1)
+            flat_rows = gather_rows.reshape(-1)[flat_valid]
+            flat_positions = positions.reshape(-1)[flat_valid]
+            flat_output = output_step.reshape(step_max_len * num_active, self.dim)[
+                flat_valid
+            ]
+            output[flat_rows, flat_positions] = flat_output.to(output.dtype)
 
-                next_sentence_length = (
-                    0 if spec.boundary else spec.sentence_length_before + chunk_len
+            flat_energy = (
+                rotor_step.square().sum(dim=-1)
+                .reshape(step_max_len * num_active, self.banks, self.gears, self.channels)
+            )[flat_valid]
+            flat_clutch = clutch_step.reshape(
+                step_max_len * num_active, self.banks, self.gears, self.channels
+            )[flat_valid]
+            flat_retention = retention_step.reshape(
+                step_max_len * num_active, self.banks, self.gears, self.channels
+            )[flat_valid]
+            energy_parts.append(flat_energy)
+            clutch_parts.append(flat_clutch)
+            retention_parts.append(flat_retention)
+
+            last_index = chunk_lens - 1
+            arange_active = torch.arange(num_active, device=device)
+            last_rotor = rotor_step[last_index, arange_active]
+            last_omega = omega_step[last_index, arange_active]
+            last_load = load_step[last_index, arange_active]
+            next_sentence_length = torch.where(
+                boundary_t,
+                torch.zeros_like(sentence_length_before_t),
+                sentence_length_before_t + chunk_lens_cpu,
+            )
+            current_rotor = self._clip_recurrent_gradient(
+                current_rotor.index_copy(0, rows_t, last_rotor)
+            )
+            current_omega = self._clip_recurrent_gradient(
+                current_omega.index_copy(0, rows_t, last_omega)
+            )
+            current_load = self._clip_recurrent_gradient(
+                current_load.index_copy(0, rows_t, last_load)
+            )
+            current_sentence_length = current_sentence_length.index_copy(
+                0, rows_t_cpu, next_sentence_length
+            )
+            current_segment_id = current_segment_id.index_copy(
+                0, rows_t_cpu, segment_t
+            )
+            if current_boundary_count is not None:
+                next_boundary_count = (
+                    current_boundary_count.index_select(0, rows_t)
+                    + boundary_t_device.long()
                 )
-                row_states[row] = GearState(
-                    rotor_step[last : last + 1, index],
-                    omega_step[last : last + 1, index],
-                    load_step[last : last + 1, index],
-                    torch.full_like(row_states[row].sentence_length, next_sentence_length),
-                    torch.full_like(row_states[row].segment_id, spec.segment),
+                current_boundary_count = current_boundary_count.index_copy(
+                    0, rows_t, next_boundary_count
                 )
 
         empty_state = hidden.new_zeros(0, self.banks, self.gears, self.channels)
-        rotor_energy_parts = [
-            torch.cat(parts, dim=0) if parts else empty_state
-            for parts in row_rotor_energy
-        ]
-        clutch_parts = [
-            torch.cat(parts, dim=0) if parts else empty_state
-            for parts in row_clutch
-        ]
-        retention_parts = [
-            torch.cat(parts, dim=0) if parts else empty_state
-            for parts in row_retention
-        ]
-        next_state = self._stack_states(row_states)
+        next_state = GearState(
+            current_rotor,
+            current_omega,
+            current_load,
+            current_sentence_length,
+            current_segment_id,
+            current_boundary_count,
+        )
         per_row_coupling = [
             torch.stack(parts).mean() if parts else hidden.new_zeros(())
             for parts in row_coupling
         ]
+        empty_long = torch.zeros(0, dtype=torch.long, device=device)
+        empty_rotor = hidden.new_zeros(0, self.banks, self.gears, self.channels, 2)
         return output, next_state, {
-            "rotor_energy": torch.cat(rotor_energy_parts, dim=0)
-            if any(part.numel() for part in rotor_energy_parts)
-            else empty_state,
-            "clutch": torch.cat(clutch_parts, dim=0)
-            if any(part.numel() for part in clutch_parts)
-            else empty_state,
-            "retention": torch.cat(retention_parts, dim=0)
-            if any(part.numel() for part in retention_parts)
-            else empty_state,
+            "rotor_energy": torch.cat(energy_parts, dim=0) if energy_parts else empty_state,
+            "clutch": torch.cat(clutch_parts, dim=0) if clutch_parts else empty_state,
+            "retention": torch.cat(retention_parts, dim=0) if retention_parts else empty_state,
             "coupling_activity": (
                 torch.stack(per_row_coupling).mean()
                 if per_row_coupling
@@ -1213,6 +1715,414 @@ class PureGearLayer(nn.Module):
             "omega": next_state.omega,
             "load": next_state.load,
             "rotor": next_state.rotor,
+            # Per-settle-event (boundary or micro_clutch) snapshots, used
+            # only by the LM-level future-rotor auxiliary loss (Phase 3.1):
+            # which row/position/segment each settle fired at, and that
+            # event's settled rotor state.
+            "settle_row": (
+                torch.cat(settle_row_parts) if settle_row_parts else empty_long
+            ),
+            "settle_position": (
+                torch.cat(settle_position_parts) if settle_position_parts else empty_long
+            ),
+            "settle_segment": (
+                torch.cat(settle_segment_parts) if settle_segment_parts else empty_long
+            ),
+            "settle_rotor": (
+                torch.cat(settle_rotor_parts, dim=0) if settle_rotor_parts else empty_rotor
+            ),
+        }
+
+    def _forward_segment_scan(
+        self,
+        hidden: torch.Tensor,
+        token_mask: torch.Tensor,
+        segment_ids: torch.Tensor,
+        sentence_end_mask: torch.Tensor,
+        state: GearState,
+        *,
+        settling_enabled: bool,
+        cross_bank: bool,
+        commuting_only: bool,
+        use_load: bool,
+    ) -> tuple[torch.Tensor, GearState, dict[str, torch.Tensor]]:
+        """Exact alternative to `_forward_batched`, valid only when angular
+        velocity is fixed (the caller must only use this when `fixed_omega`
+        is True -- see segment_scan.py's module docstring for why). Moves
+        the per-token affine recurrence out of the chunk-step loop entirely
+        (Level 0: one whole-sequence scan), leaving only a per-chunk-
+        summary propagation across the genuinely irreducible settle()/reset
+        dependency (Level 1: same round count as `_forward_batched`, but
+        each round now touches only [batch, banks, gears, channels, ...]
+        summaries, no per-token tensors), then one vectorized broadcast
+        back to every token (Level 2).
+
+        Unlike `_forward_batched`, this method needs `token_mask` both as a
+        CPU-only input to the Python `_chunk_plan` bookkeeping *and* as a
+        device-resident mask for the final vectorized output write -- so,
+        unlike `_forward_batched`'s contract, callers must pass the
+        original device-resident `token_mask`/`segment_ids`/
+        `sentence_end_mask` here, not pre-cast CPU copies; the CPU copies
+        needed for `_chunk_plan` are built internally below.
+        """
+        device = hidden.device
+        batch, length = hidden.shape[0], hidden.shape[1]
+        delta, clutch_controls, torque, retention_controls = (
+            self._project_token_controls(hidden)
+        )
+
+        control_token_mask = token_mask.detach().to(device="cpu", dtype=torch.bool)
+        control_segment_ids = segment_ids.detach().to(device="cpu", dtype=torch.long)
+        control_sentence_end_mask = sentence_end_mask.detach().to(
+            device="cpu", dtype=torch.bool
+        )
+        content_trigger = self._content_trigger(clutch_controls)
+        plans: list[list[_ChunkSpec]] = []
+        for row in range(batch):
+            chunks, _zeros = self._chunk_plan(
+                control_token_mask[row],
+                control_segment_ids[row],
+                control_sentence_end_mask[row],
+                int(state.segment_id[row].item()),
+                int(state.sentence_length[row].item()),
+                content_trigger[row] if content_trigger is not None else None,
+            )
+            plans.append(chunks)
+        max_chunks = max((len(plan) for plan in plans), default=0)
+
+        fresh = self.initial_state(1, device)
+        fresh_rotor, fresh_omega, fresh_load = (
+            fresh.rotor[0], fresh.omega[0], fresh.load[0]
+        )
+        empty_state = hidden.new_zeros(0, self.banks, self.gears, self.channels)
+
+        if max_chunks == 0:
+            empty_long = torch.zeros(0, dtype=torch.long, device=device)
+            empty_rotor = hidden.new_zeros(0, self.banks, self.gears, self.channels, 2)
+            return (
+                hidden.new_zeros(batch, length, self.dim),
+                state,
+                {
+                    "rotor_energy": empty_state,
+                    "clutch": empty_state,
+                    "retention": empty_state,
+                    "coupling_activity": hidden.new_zeros(()),
+                    "omega": state.omega,
+                    "load": state.load,
+                    "rotor": state.rotor,
+                    "settle_row": empty_long,
+                    "settle_position": empty_long,
+                    "settle_segment": empty_long,
+                    "settle_rotor": empty_rotor,
+                },
+            )
+
+        # ---- Level 0: one whole-sequence affine scan, no loop. ---------
+        # omega is fixed (not carried state) by this path's precondition,
+        # so every chunk's phase recurrence can use the same constant --
+        # this is exactly the coupling that makes the general (learned
+        # omega) case unable to take this shortcut.
+        omega_const = self.config.omega_limit * torch.tanh(
+            self.base_omega.float() / self.config.omega_limit
+        )
+        angle = delta + omega_const[None, None]
+        scale = retention_controls
+        multiplier = torch.stack(
+            (scale * angle.cos(), scale * angle.sin()), dim=-1
+        )
+        bias = torque
+
+        row_index_list: list[int] = []
+        start_position_list: list[int] = []
+        chunk_end_list: list[list[int]] = []
+        needs_reset_list: list[list[int]] = []
+        settle_list: list[list[int]] = []
+        valid_round_list: list[list[int]] = []
+        boundary_list: list[list[int]] = []
+        sentence_length_before_list: list[list[int]] = []
+        chunk_len_list: list[list[int]] = []
+        segment_list: list[list[int]] = []
+        for row, plan in enumerate(plans):
+            pad = max_chunks - len(plan)
+            for spec in plan:
+                row_index_list.append(row)
+                start_position_list.append(spec.start)
+            chunk_end_list.append(
+                [spec.stop - 1 for spec in plan] + [0] * pad
+            )
+            needs_reset_list.append(
+                [int(spec.needs_reset) for spec in plan] + [0] * pad
+            )
+            settle_list.append(
+                [int(spec.boundary or spec.micro_clutch) for spec in plan]
+                + [0] * pad
+            )
+            valid_round_list.append([1] * len(plan) + [0] * pad)
+            boundary_list.append(
+                [int(spec.boundary) for spec in plan] + [0] * pad
+            )
+            sentence_length_before_list.append(
+                [spec.sentence_length_before for spec in plan] + [0] * pad
+            )
+            chunk_len_list.append(
+                [spec.stop - spec.start for spec in plan] + [0] * pad
+            )
+            segment_list.append(
+                [spec.segment for spec in plan]
+                + [int(state.segment_id[row])] * pad
+            )
+
+        reset_rows = torch.tensor(row_index_list, device=device, dtype=torch.long)
+        reset_positions = torch.tensor(
+            start_position_list, device=device, dtype=torch.long
+        )
+        reset_mask = torch.zeros(batch, length, dtype=torch.bool, device=device)
+        reset_mask[reset_rows, reset_positions] = True
+
+        local_value, local_multiplier = local_token_scan(multiplier, bias, reset_mask)
+
+        chunk_end_index = torch.tensor(chunk_end_list, device=device, dtype=torch.long)
+        chunk_local_bias, chunk_local_multiplier = gather_chunk_summary(
+            local_value, local_multiplier, chunk_end_index
+        )
+
+        needs_reset_all = torch.tensor(needs_reset_list, dtype=torch.bool, device=device)
+        settle_all = torch.tensor(settle_list, dtype=torch.bool, device=device)
+        valid_round_all = torch.tensor(valid_round_list, dtype=torch.bool, device=device)
+        valid_round_all_cpu = torch.tensor(valid_round_list, dtype=torch.bool)
+        boundary_all = torch.tensor(boundary_list, dtype=torch.bool)
+        sentence_length_before_all = torch.tensor(
+            sentence_length_before_list, dtype=torch.long
+        )
+        chunk_len_all = torch.tensor(chunk_len_list, dtype=torch.long)
+        segment_all = torch.tensor(segment_list, dtype=torch.long)
+        # Device copies built once here, not per-round inside the Level-1
+        # loop below, to avoid a repeated device sync when recording each
+        # settle event's segment id for the future-rotor auxiliary loss,
+        # or (boundary_all_device) when incrementing the gear-ratio
+        # cadence counter (Phase 3.2).
+        segment_all_device = segment_all.to(device)
+        boundary_all_device = boundary_all.to(device)
+
+        # ---- Level 1: per-chunk-summary propagation. Irreducible in
+        # round count (settle()'s nonlinearity, by design, cannot be
+        # parallel-scanned over), but every round here only touches
+        # [batch, banks, gears, channels, ...] summaries -- no per-token
+        # tensor survives in this loop, unlike `_forward_batched`'s
+        # per-round token-window gather/scatter.
+        current_rotor = state.rotor.clone()
+        current_load = state.load.clone()
+        current_sentence_length = state.sentence_length.clone()
+        current_segment_id = state.segment_id.clone()
+        current_boundary_count = (
+            state.boundary_count.clone() if state.boundary_count is not None else None
+        )
+
+        entry_rotor_parts: list[torch.Tensor] = []
+        entry_load_parts: list[torch.Tensor] = []
+        exit_rotor_parts: list[torch.Tensor] = []
+        exit_load_parts: list[torch.Tensor] = []
+        row_coupling: list[list[torch.Tensor]] = [[] for _ in range(batch)]
+        settle_row_parts: list[torch.Tensor] = []
+        settle_position_parts: list[torch.Tensor] = []
+        settle_segment_parts: list[torch.Tensor] = []
+        settle_rotor_parts: list[torch.Tensor] = []
+
+        for k in range(max_chunks):
+            valid_k = valid_round_all[:, k]
+            needs_reset_k = needs_reset_all[:, k]
+
+            reset_mask_k = needs_reset_k[:, None, None, None]
+            rotor_in = torch.where(
+                reset_mask_k[..., None].expand(
+                    -1, self.banks, self.gears, self.channels, 2
+                ),
+                fresh_rotor[None].expand(batch, -1, -1, -1, -1),
+                current_rotor,
+            )
+            load_in = torch.where(
+                reset_mask_k.expand(-1, self.banks, self.gears, self.channels),
+                fresh_load[None].expand(batch, -1, -1, -1),
+                current_load,
+            )
+            entry_rotor_parts.append(rotor_in)
+            entry_load_parts.append(load_in)
+
+            natural_exit_rotor = (
+                complex_mul(chunk_local_multiplier[:, k], rotor_in)
+                + chunk_local_bias[:, k]
+            )
+
+            settle_mask_k = settle_all[:, k] & valid_k
+            if settling_enabled and bool(settle_mask_k.any()):
+                settle_rows = settle_mask_k.nonzero(as_tuple=True)[0]
+                boundary_state = GearState(
+                    natural_exit_rotor.index_select(0, settle_rows),
+                    omega_const[None].expand(settle_rows.numel(), -1, -1, -1),
+                    load_in.index_select(0, settle_rows),
+                    hidden.new_zeros(settle_rows.numel(), dtype=torch.long),
+                    hidden.new_zeros(settle_rows.numel(), dtype=torch.long),
+                    (
+                        current_boundary_count.index_select(0, settle_rows)
+                        if current_boundary_count is not None
+                        else None
+                    ),
+                )
+                settled_state, coupling = self.settle(
+                    boundary_state,
+                    cross_bank=cross_bank,
+                    commuting_only=commuting_only,
+                    use_load=use_load,
+                )
+                exit_rotor_k = natural_exit_rotor.index_copy(
+                    0, settle_rows, settled_state.rotor
+                )
+                exit_load_k = load_in.index_copy(0, settle_rows, settled_state.load)
+                for row in settle_rows.tolist():
+                    row_coupling[row].append(coupling)
+                settle_row_parts.append(settle_rows)
+                settle_position_parts.append(chunk_end_index[settle_rows, k])
+                settle_segment_parts.append(segment_all_device[settle_rows, k])
+                settle_rotor_parts.append(settled_state.rotor)
+            else:
+                exit_rotor_k = natural_exit_rotor
+                exit_load_k = load_in
+
+            exit_rotor_parts.append(exit_rotor_k)
+            exit_load_parts.append(exit_load_k)
+
+            current_rotor = self._clip_recurrent_gradient(
+                torch.where(
+                    valid_k[:, None, None, None, None], exit_rotor_k, current_rotor
+                )
+            )
+            current_load = self._clip_recurrent_gradient(
+                torch.where(
+                    valid_k[:, None, None, None], exit_load_k, current_load
+                )
+            )
+
+            boundary_k = boundary_all[:, k]
+            next_sentence_length = torch.where(
+                boundary_k,
+                torch.zeros_like(sentence_length_before_all[:, k]),
+                sentence_length_before_all[:, k] + chunk_len_all[:, k],
+            )
+            valid_k_cpu = valid_round_all_cpu[:, k]
+            current_sentence_length = torch.where(
+                valid_k_cpu, next_sentence_length, current_sentence_length
+            )
+            current_segment_id = torch.where(
+                valid_k_cpu, segment_all[:, k], current_segment_id
+            )
+            if current_boundary_count is not None:
+                current_boundary_count = torch.where(
+                    valid_k & boundary_all_device[:, k],
+                    current_boundary_count + 1,
+                    current_boundary_count,
+                )
+
+        next_state = GearState(
+            current_rotor,
+            omega_const[None].expand(batch, -1, -1, -1).clone(),
+            current_load,
+            current_sentence_length,
+            current_segment_id,
+            current_boundary_count,
+        )
+
+        # ---- Level 2: one vectorized broadcast back to every token. ----
+        entry_rotor_history = torch.stack(entry_rotor_parts, dim=1)
+        entry_load_history = torch.stack(entry_load_parts, dim=1)
+        exit_rotor_history = torch.stack(exit_rotor_parts, dim=1)
+        exit_load_history = torch.stack(exit_load_parts, dim=1)
+
+        chunk_index_of = (reset_mask.cumsum(dim=1) - 1).clamp_min(0)
+        final_rotor = broadcast_affine(
+            local_multiplier, local_value, entry_rotor_history, chunk_index_of
+        )
+        load_gather_index = chunk_index_of.reshape(batch, length, 1, 1, 1).expand(
+            -1, -1, self.banks, self.gears, self.channels
+        )
+        load_broadcast = entry_load_history.gather(1, load_gather_index)
+        rotor_gather_index = chunk_index_of.reshape(
+            batch, length, 1, 1, 1, 1
+        ).expand(-1, -1, self.banks, self.gears, self.channels, 2)
+        entry_rotor_broadcast = entry_rotor_history.gather(1, rotor_gather_index)
+
+        # settle()/reset overwrites exactly each chunk's own last token
+        # (matching `_forward_batched`'s index_put at that position) --
+        # everywhere else the broadcast formula above is already exact.
+        flat_rows = (
+            torch.arange(batch, device=device)[:, None]
+            .expand(-1, max_chunks)
+            .reshape(-1)
+        )
+        flat_positions = chunk_end_index.reshape(-1)
+        flat_valid = valid_round_all.reshape(-1)
+        scatter_rows = flat_rows[flat_valid]
+        scatter_positions = flat_positions[flat_valid]
+        final_rotor[scatter_rows, scatter_positions] = (
+            exit_rotor_history.reshape(-1, self.banks, self.gears, self.channels, 2)[
+                flat_valid
+            ].to(final_rotor.dtype)
+        )
+        load_broadcast[scatter_rows, scatter_positions] = (
+            exit_load_history.reshape(-1, self.banks, self.gears, self.channels)[
+                flat_valid
+            ].to(load_broadcast.dtype)
+        )
+
+        is_chunk_start = reset_mask[..., None, None, None, None]
+        shifted_rotor = torch.cat(
+            (final_rotor[:, :1], final_rotor[:, :-1]), dim=1
+        )
+        previous_rotor = torch.where(
+            is_chunk_start, entry_rotor_broadcast, shifted_rotor
+        )
+
+        omega_for_readout = omega_const[None, None].expand(batch, length, -1, -1, -1)
+        output = self._readout(
+            final_rotor.reshape(batch * length, self.banks, self.gears, self.channels, 2),
+            omega_for_readout.reshape(batch * length, self.banks, self.gears, self.channels),
+            load_broadcast.reshape(batch * length, self.banks, self.gears, self.channels),
+            clutch_controls.reshape(batch * length, self.banks, self.gears, self.channels),
+            previous_rotor.reshape(
+                batch * length, self.banks, self.gears, self.channels, 2
+            ),
+        ).reshape(batch, length, self.dim)
+        valid_token = token_mask.to(device=device, dtype=torch.bool)
+        output = torch.where(valid_token[..., None], output, torch.zeros_like(output))
+        per_row_coupling = [
+            torch.stack(parts).mean() if parts else hidden.new_zeros(())
+            for parts in row_coupling
+        ]
+        empty_long = torch.zeros(0, dtype=torch.long, device=device)
+        empty_rotor = hidden.new_zeros(0, self.banks, self.gears, self.channels, 2)
+        return output, next_state, {
+            "rotor_energy": final_rotor.square().sum(dim=-1)[valid_token],
+            "clutch": clutch_controls[valid_token],
+            "retention": retention_controls[valid_token],
+            "coupling_activity": (
+                torch.stack(per_row_coupling).mean()
+                if per_row_coupling
+                else hidden.new_zeros(())
+            ),
+            "omega": next_state.omega,
+            "load": next_state.load,
+            "rotor": next_state.rotor,
+            "settle_row": (
+                torch.cat(settle_row_parts) if settle_row_parts else empty_long
+            ),
+            "settle_position": (
+                torch.cat(settle_position_parts) if settle_position_parts else empty_long
+            ),
+            "settle_segment": (
+                torch.cat(settle_segment_parts) if settle_segment_parts else empty_long
+            ),
+            "settle_rotor": (
+                torch.cat(settle_rotor_parts, dim=0) if settle_rotor_parts else empty_rotor
+            ),
         }
 
     def forward(
@@ -1248,23 +2158,40 @@ class PureGearLayer(nn.Module):
         )
         use_load = self.config.use_load_state and "no_load_state" not in disabled
 
-        control_token_mask = token_mask.detach().to(device="cpu", dtype=torch.bool)
-        control_segment_ids = segment_ids.detach().to(device="cpu", dtype=torch.long)
-        control_sentence_end_mask = sentence_end_mask.detach().to(
-            device="cpu", dtype=torch.bool
-        )
-        gear_output, next_state, record = self._forward_batched(
-            hidden,
-            control_token_mask,
-            control_segment_ids,
-            control_sentence_end_mask,
-            state,
-            fixed_omega=fixed_omega,
-            settling_enabled=settling_enabled,
-            cross_bank=cross_bank,
-            commuting_only=commuting_only,
-            use_load=use_load,
-        )
+        if self.config.use_segment_scan and fixed_omega:
+            # Exact only when omega is fixed -- see segment_scan.py's
+            # module docstring. Falls back to `_forward_batched` otherwise
+            # rather than raising, since `fixed_omega` is itself derived
+            # from ablations that can vary call-to-call.
+            gear_output, next_state, record = self._forward_segment_scan(
+                hidden,
+                token_mask,
+                segment_ids,
+                sentence_end_mask,
+                state,
+                settling_enabled=settling_enabled,
+                cross_bank=cross_bank,
+                commuting_only=commuting_only,
+                use_load=use_load,
+            )
+        else:
+            control_token_mask = token_mask.detach().to(device="cpu", dtype=torch.bool)
+            control_segment_ids = segment_ids.detach().to(device="cpu", dtype=torch.long)
+            control_sentence_end_mask = sentence_end_mask.detach().to(
+                device="cpu", dtype=torch.bool
+            )
+            gear_output, next_state, record = self._forward_batched(
+                hidden,
+                control_token_mask,
+                control_segment_ids,
+                control_sentence_end_mask,
+                state,
+                fixed_omega=fixed_omega,
+                settling_enabled=settling_enabled,
+                cross_bank=cross_bank,
+                commuting_only=commuting_only,
+                use_load=use_load,
+            )
         residual_scale = self.residual_floor + (
             1.0 - self.residual_floor
         ) * torch.sigmoid(self.gear_residual)
@@ -1331,6 +2258,21 @@ class FastWeightMemory(nn.Module):
         target = config.copy_gate_target_mean
         nn.init.constant_(self.gate_proj.bias, math.log(target / (1.0 - target)))
 
+        # Phase 3.5: "settle = consolidate" -- a learned per-bank gate
+        # applied to the accumulated matrix specifically at sentence-
+        # boundary chunk splits (not at segment-change resets, which
+        # already zero it outright). Registered as a real Parameter only
+        # when actually used, mirroring PureGearLayer's own conditional-
+        # Parameter-vs-buffer pattern for gated mechanisms (intra_gate,
+        # depth_response, etc.) so a disabled (default) memory carries no
+        # extra trainable parameters. Init to sigmoid(3.0)~=0.95 -- a mild
+        # consolidation pulse, not a near-total wipe, so enabling this
+        # doesn't suddenly destabilize an otherwise-unrelated training run.
+        if config.unify_memory_consolidation:
+            self.consolidation_gate = nn.Parameter(torch.full((self.banks,), 3.0))
+        else:
+            self.register_buffer("consolidation_gate", torch.full((self.banks,), 3.0))
+
     def initial_state(self, batch: int, device: torch.device) -> FastWeightMemoryState:
         matrix = torch.zeros(
             batch, self.banks, self.key_dim, self.value_dim, device=device
@@ -1343,7 +2285,17 @@ class FastWeightMemory(nn.Module):
         token_mask_row: torch.Tensor,
         segment_ids_row: torch.Tensor,
         initial_segment: int,
+        sentence_end_mask_row: torch.Tensor | None = None,
     ) -> tuple[list[_MemoryChunkSpec], list[int]]:
+        """`sentence_end_mask_row` (Phase 3.5, optional): when given (only
+        when config.unify_memory_consolidation is on), a sentence end also
+        forces a chunk split here -- a *split*, not a reset, so it leaves
+        the exact accumulated matrix value unchanged on its own (the
+        rescale-cumsum recurrence this chunks is exact regardless of where
+        it's split); it only matters because it gives forward() a place to
+        apply the consolidation gate. None (the default) means no extra
+        splitting, identical to pre-Phase-3.5 behavior.
+        """
         length = int(token_mask_row.shape[0])
         chunks: list[_MemoryChunkSpec] = []
         zero_positions: list[int] = []
@@ -1359,6 +2311,7 @@ class FastWeightMemory(nn.Module):
             if needs_reset:
                 current_segment = segment
             stop = min(length, position + self.chunk_tokens)
+            boundary = False
             for candidate in range(position, stop):
                 if (
                     not bool(token_mask_row[candidate])
@@ -1366,9 +2319,16 @@ class FastWeightMemory(nn.Module):
                 ):
                     stop = candidate
                     break
+                if (
+                    sentence_end_mask_row is not None
+                    and bool(sentence_end_mask_row[candidate])
+                ):
+                    stop = candidate + 1
+                    boundary = True
+                    break
             if stop == position:
                 continue
-            chunks.append(_MemoryChunkSpec(position, stop, needs_reset, segment))
+            chunks.append(_MemoryChunkSpec(position, stop, needs_reset, segment, boundary))
             position = stop
         return chunks, zero_positions
 
@@ -1380,6 +2340,7 @@ class FastWeightMemory(nn.Module):
         segment_ids: torch.Tensor,
         head: nn.Linear,
         state: FastWeightMemoryState | None,
+        sentence_end_mask: torch.Tensor | None = None,
     ) -> tuple[
         torch.Tensor, torch.Tensor, torch.Tensor, FastWeightMemoryState, dict
     ]:
@@ -1400,6 +2361,11 @@ class FastWeightMemory(nn.Module):
 
         control_token_mask = token_mask.detach().to(device="cpu", dtype=torch.bool)
         control_segment_ids = segment_ids.detach().to(device="cpu", dtype=torch.long)
+        control_sentence_end_mask = (
+            sentence_end_mask.detach().to(device="cpu", dtype=torch.bool)
+            if self.config.unify_memory_consolidation and sentence_end_mask is not None
+            else None
+        )
 
         plans: list[list[_MemoryChunkSpec]] = []
         for row in range(batch):
@@ -1407,6 +2373,11 @@ class FastWeightMemory(nn.Module):
                 control_token_mask[row],
                 control_segment_ids[row],
                 int(state.segment_id[row].item()),
+                (
+                    control_sentence_end_mask[row]
+                    if control_sentence_end_mask is not None
+                    else None
+                ),
             )
             plans.append(chunks)
 
@@ -1474,8 +2445,17 @@ class FastWeightMemory(nn.Module):
                 row_memory_energy[row].append(
                     matrix_t[:chunk_len, index].square().sum(dim=(-1, -2))
                 )
+                carried_matrix = matrix_t[last : last + 1, index]
+                if spec.boundary:
+                    # Phase 3.5 "settle = consolidate": a learned per-bank
+                    # pulse applied only at a real sentence-boundary chunk
+                    # split, not at the ordinary chunk_tokens-truncation
+                    # splits or segment-change resets above.
+                    carried_matrix = carried_matrix * torch.sigmoid(
+                        self.consolidation_gate
+                    )[None, :, None, None]
                 row_states[row] = FastWeightMemoryState(
-                    matrix_t[last : last + 1, index],
+                    carried_matrix,
                     torch.full((1,), spec.segment, dtype=torch.long),
                 )
 
@@ -1545,6 +2525,29 @@ class PureParallelGearLM(nn.Module):
             FastWeightMemory(config) if config.use_fast_weight_memory else None
         )
         self._boundary_detector = None
+        # Future-rotor auxiliary loss (Phase 3.1): training-only, zero
+        # inference cost, same pattern bounded_hybrid_gear's
+        # BlockHybridGearV4LM already uses (future_heads + future_horizons)
+        # -- one linear head per bank projecting that bank's settled rotor
+        # state into embedding space, trained to predict the embedding of
+        # the token future_horizons[bank] positions ahead of each settle
+        # point. Ported, not re-derived: same per-bank-horizon structure,
+        # same cosine-distance training signal, same detached target.
+        self.future_heads = nn.ModuleList(
+            [
+                nn.Linear(
+                    config.gears_per_bank * config.rotor_channels * 2,
+                    config.dim,
+                    bias=False,
+                )
+                for _ in range(config.num_banks)
+            ]
+        )
+        self.register_buffer(
+            "_future_horizon_offsets",
+            torch.tensor(config.future_horizons, dtype=torch.long),
+            persistent=False,
+        )
         nn.init.normal_(self.token.weight, mean=0.0, std=0.02)
 
     def configure_boundary_detector(self, tokenizer: Any) -> None:
@@ -1665,6 +2668,7 @@ class PureParallelGearLM(nn.Module):
                 control_segment_ids,
                 self.head,
                 memory_state,
+                control_sentence_end_mask,
             )
             hidden = (
                 hidden
@@ -1722,6 +2726,56 @@ class PureParallelGearLM(nn.Module):
         if segment_ids is not None:
             valid &= segment_ids[:, 1:] == segment_ids[:, :-1]
         return valid
+
+    def _future_loss(
+        self,
+        record: dict[str, torch.Tensor],
+        tokens: torch.Tensor,
+        token_mask: torch.Tensor,
+        segment_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        """Training-only auxiliary loss: predict, from each settle event's
+        settled rotor state, the embedding of the token `future_horizons
+        [bank]` positions ahead -- ported from bounded_hybrid_gear's
+        BlockHybridGearV4LM._future_loss (same per-bank-horizon structure,
+        same cosine-distance signal against a detached target embedding).
+        Zero inference cost: only ever called from training_step, never
+        from forward()/generation.
+        """
+        settle_row = record["settle_row"]
+        if settle_row.numel() == 0:
+            return self.token.weight.sum() * 0.0
+        settle_position = record["settle_position"]
+        settle_segment = record["settle_segment"]
+        settle_rotor = record["settle_rotor"]
+
+        length = tokens.shape[1]
+        horizons = self._future_horizon_offsets
+        target_position = settle_position[:, None] + horizons[None]
+        within = target_position < length
+        clamped = target_position.clamp_max(length - 1)
+        rows = settle_row[:, None].expand_as(clamped)
+        target_tokens = tokens[rows, clamped]
+        target_segments = segment_ids[rows, clamped]
+        target_valid = token_mask[rows, clamped]
+
+        weights = torch.stack(
+            [head.weight for head in self.future_heads], dim=0
+        )
+        flat_rotor = settle_rotor.flatten(2)
+        prediction = F.normalize(
+            torch.einsum("nkf,kdf->nkd", flat_rotor, weights).float(), dim=-1
+        )
+        target = F.normalize(
+            self.token(target_tokens).detach().float(), dim=-1
+        )
+
+        valid = within & target_valid & (target_segments == settle_segment[:, None])
+        distance = 1.0 - (prediction * target).sum(dim=-1)
+        valid_float = valid.to(distance.dtype)
+        per_bank_count = valid_float.sum(dim=0).clamp_min(1)
+        per_bank_loss = (distance * valid_float).sum(dim=0) / per_bank_count
+        return per_bank_loss.mean()
 
     def training_step(
         self,
@@ -1831,7 +2885,45 @@ class PureParallelGearLM(nn.Module):
         ).mean()
         scales = loss_term_scales or {}
         regularizer_scale = float(metadata.get("regularizer_scale", 1.0))
+        # Ported from bounded_hybrid_gear's BlockHybridGearV4LM: an
+        # auxiliary predictive objective, not a stability regularizer, so
+        # it is weighted directly (not nested inside regularizer_scale's
+        # annealing) and skipped entirely when its weight is zero -- it's
+        # the one term here with a non-trivial compute cost (an embedding
+        # lookup plus a per-bank einsum), unlike the cheap elementwise
+        # regularizers below.
+        future_scale = float(metadata.get("future_aux_scale", 1.0))
+        future_weight = (
+            self.config.future_aux_weight
+            * future_scale
+            * scales.get("future_rotor", 1.0)
+        )
+        if future_weight != 0.0:
+            # _future_loss indexes tokens/masks with device-resident
+            # settle_row/clamped index tensors (see _future_loss), so
+            # these must stay on tokens' own device -- unlike
+            # self._masks(), which deliberately forces CPU for
+            # _chunk_plan's Python bookkeeping (not needed here).
+            resolved_token_mask = (
+                token_mask.to(device=tokens.device, dtype=torch.bool)
+                if token_mask is not None
+                else torch.ones_like(tokens, dtype=torch.bool)
+            )
+            resolved_segment_ids = (
+                segment_ids.to(device=tokens.device, dtype=torch.long)
+                if segment_ids is not None
+                else torch.zeros_like(tokens)
+            )
+            future_rotor_loss = self._future_loss(
+                records[len(self.layers) - 1],
+                tokens,
+                resolved_token_mask,
+                resolved_segment_ids,
+            )
+        else:
+            future_rotor_loss = hidden.sum() * 0.0
         total = scales.get("language_modeling", 1.0) * language_modeling
+        total = total + future_weight * future_rotor_loss
         total = total + regularizer_scale * (
             self.config.rotor_energy_weight
             * scales.get("rotor_energy", 1.0)
@@ -1848,6 +2940,7 @@ class PureParallelGearLM(nn.Module):
         )
         metrics = {
             "language_modeling": language_modeling,
+            "future_rotor": future_rotor_loss,
             "rotor_energy": rotor_energy,
             "omega_saturation": omega_saturation,
             "clutch_collapse": clutch_collapse,
@@ -2050,7 +3143,12 @@ class PureParallelGearLM(nn.Module):
                         float(self.layers[0].retention_high[bank, 0, 0]),
                     ]
                     for bank in range(self.layers[0].banks)
-                ]
+                ],
+                "control_path": (
+                    "cpu_planned_sentence_chunks_with_sequential_settling"
+                    if self.config.boundary_settling
+                    else "cpu_planned_sentence_chunks"
+                ),
             },
             "invariants": {
                 "sequence_mixing": (
@@ -2058,7 +3156,11 @@ class PureParallelGearLM(nn.Module):
                     if self.memory is None
                     else "persistent_affine_rotors_plus_fast_weight_memory"
                 ),
-                "sentence_execution": "parallel_affine_scan",
+                "sentence_execution": (
+                    "parallel_affine_scan_with_sequential_boundary_settling"
+                    if self.config.boundary_settling
+                    else "parallel_affine_scan"
+                ),
                 "self_attention": False,
                 # The memory has cosine-similarity key/query projections,
                 # but no fast-weight memory means no qkv-style mechanism at
@@ -2071,6 +3173,8 @@ class PureParallelGearLM(nn.Module):
                 "token_routing": False,
                 "transformer_blocks": False,
                 "fast_weight_memory": self.memory is not None,
+                "host_scalar_control_flow": True,
+                "sequence_square_tensor": False,
             },
         }
 

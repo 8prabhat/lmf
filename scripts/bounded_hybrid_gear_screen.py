@@ -16,9 +16,13 @@ import torch
 import torch.nn.functional as F
 
 from lmf.ablation.stats import analytic_confidence_interval
-from lmf.core.hashing import file_sha256, json_sha256
+from lmf.core.hashing import file_sha256, git_tree_sha256, json_sha256
 from lmf.core.seeding import seed_everything
-from lmf.data import ContiguousDocumentLaneCorpus, PairedDocumentManifestCorpus
+from lmf.data import (
+    ContiguousDocumentLaneCorpus,
+    PairedDocumentManifestCorpus,
+    tokenizer_fingerprint,
+)
 from lmf.models.bounded_hybrid_gear import (
     BlockHybridGearV4Config,
     BlockHybridGearV4LM,
@@ -63,6 +67,12 @@ def parse_args() -> argparse.Namespace:
         "--output-dir",
         type=Path,
         default=Path("outputs/bounded_hybrid_gear/screen_200k"),
+    )
+    parser.add_argument(
+        "--qualification",
+        type=Path,
+        required=True,
+        help="candidate-matched passed engineering qualification JSON",
     )
     parser.add_argument(
         "--tokenizer-name",
@@ -235,6 +245,48 @@ def evaluate(model, manifest_root: Path, batch_size: int, max_rows: int):
 
 def main() -> None:
     args = parse_args()
+    qualification = json.loads(args.qualification.read_text())
+    current_code_hash = git_tree_sha256()
+    qualified_code_hash = qualification.get("environment", {}).get(
+        "code_hash"
+    )
+    if qualified_code_hash != current_code_hash:
+        raise RuntimeError(
+            "qualification was produced by different code "
+            f"({qualified_code_hash} != {current_code_hash}); rerun it"
+        )
+    if not qualification.get("block_hybrid_gear_qualified", False):
+        raise RuntimeError(
+            "the supplied block-hybrid engineering qualification did not pass"
+        )
+    qualified_config = qualification["models"]["block_hybrid_gear"][
+        "instantiated_config"
+    ]
+    requested_fusion = {
+        "bounded_hybrid_gear_block_additive": "additive",
+        "bounded_hybrid_gear_block_selective_film": "selective_film",
+        "bounded_hybrid_gear_block_bank_router": "bank_router",
+    }[args.candidate_name]
+    expected = {
+        "fusion_mode": requested_fusion,
+        "fusion_rank": args.fusion_rank,
+        "ffn_dim": args.v4_ffn_dim,
+        "attention_window": args.attention_window,
+        "block_tokens": args.block_tokens,
+    }
+    mismatches = {
+        key: {
+            "qualified": qualified_config.get(key),
+            "requested": value,
+        }
+        for key, value in expected.items()
+        if qualified_config.get(key) != value
+    }
+    if mismatches:
+        raise RuntimeError(
+            "qualification does not match the requested candidate: "
+            f"{mismatches}"
+        )
     seeds = tuple(int(value) for value in args.seeds.split(","))
     args.output_dir.mkdir(parents=True, exist_ok=True)
     probe_corpus = ContiguousDocumentLaneCorpus(
@@ -252,6 +304,26 @@ def main() -> None:
             "torch": torch.__version__,
             "platform": platform.platform(),
             "device": args.device,
+            "precision": "fp32",
+            "code_hash": current_code_hash,
+        },
+        "qualification": {
+            "path": str(args.qualification),
+            "sha256": file_sha256(args.qualification),
+        },
+        "data": {
+            "corpus_root": str(args.corpus_root),
+            "index_root": str(args.index_root),
+            "index_hash": file_sha256(args.index_root / "index.json"),
+            "validation_manifest": str(args.validation_manifest),
+            "validation_manifest_hash": file_sha256(
+                args.validation_manifest / "manifest.json"
+            ),
+            "tokenizer_name": args.tokenizer_name,
+            "tokenizer_fingerprint": tokenizer_fingerprint(
+                probe_corpus.tokenizer
+            ),
+            "domains": DOMAINS,
         },
         "tokens_requested": args.tokens,
         "batch_size": args.batch_size,

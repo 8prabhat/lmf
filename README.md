@@ -99,6 +99,12 @@ preparation, gated scale workflow, and honest stopping rules are documented in
 Verified implementation status and the still-unrun compute stages are recorded
 in [`docs/pure_parallel_gear/pure_parallel_gear_implementation_report.md`](docs/pure_parallel_gear/pure_parallel_gear_implementation_report.md).
 
+The post-refactor Gear-family correctness/fairness audit and corrected
+three-seed rerun are recorded in
+[`docs/bounded_hybrid_gear/refactor_audit_20260621.md`](docs/bounded_hybrid_gear/refactor_audit_20260621.md).
+Pure Gear fails engineering throughput qualification; block-rate Hybrid Gear
+passes engineering qualification but fails the 1M Gear-removal quality gate.
+
 The canonical family deliberately contains no attention, Q/K/V projections,
 token-history retrieval, routing over previous tokens, or KV cache. SentencePiece
 BPE is shared unchanged with the Transformer and GRU controls.

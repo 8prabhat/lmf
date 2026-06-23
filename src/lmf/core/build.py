@@ -53,21 +53,42 @@ def configure_token_hierarchy(model, tokenizer) -> bool:
     return True
 
 
+def configure_boundary_detector(model, tokenizer) -> bool:
+    """Install the corpus tokenizer for models with incremental boundaries."""
+    configure = getattr(model, "configure_boundary_detector", None)
+    if configure is None or tokenizer is None:
+        return False
+    configure(tokenizer)
+    return True
+
+
 def build(cfg: ExperimentConfig, *, run_overrides: dict[str, Any] | None = None):
     """Build (corpus, model, trainer, run) purely from registry names in cfg."""
     seed_everything(int(cfg.get("seed", 0)))
     corpus = build_corpus(cfg.data or {"name": "procedural", "vocab_size": 512})
     model_cfg = dict(cfg.model)
     model_name = model_cfg.pop("name", "rhca")
+    declared_vocab_size = model_cfg.get("vocab_size")
+    if (
+        declared_vocab_size is not None
+        and int(declared_vocab_size) != int(corpus.vocab_size)
+    ):
+        raise ValueError(
+            f"model vocab_size={declared_vocab_size} does not match "
+            f"corpus vocab_size={corpus.vocab_size}; silent vocabulary "
+            "replacement is disabled"
+        )
     token_embedding_init = model_cfg.pop("token_embedding_init", None)
     # Wire the corpus's reserved control-token IDs into the model so EOS-stopping
     # and pad handling actually work at generation time (review finding 7).
     if model_name == "rhca" and "special_token_ids" not in model_cfg:
         model_cfg["special_token_ids"] = special_token_ids(corpus)
     model = MODELS.create(model_name, model_cfg, corpus.vocab_size)
-    configure_token_hierarchy(model, getattr(corpus, "tokenizer", None))
+    tokenizer = getattr(corpus, "tokenizer", None)
+    configure_token_hierarchy(model, tokenizer)
+    configure_boundary_detector(model, tokenizer)
     if token_embedding_init is not None:
-        initialize_token_embeddings(model, getattr(corpus, "tokenizer", None), token_embedding_init)
+        initialize_token_embeddings(model, tokenizer, token_embedding_init)
     trainer_cfg = dict(cfg.trainer)
     trainer_name = trainer_cfg.pop("name", model_name)
     run = {**(cfg.get("run", {}) or {}), **(run_overrides or {})}

@@ -2,6 +2,11 @@
 
 Date: 2026-06-21
 
+> Superseded for decision-making by
+> `refactor_audit_20260621.md`. The corrected post-refactor rerun uses strict
+> code-hash qualification, document-isolated Gear fusion, and an unbiased
+> fused-causal full Transformer baseline.
+
 ## Scope completed
 
 After V4.1 failed to prove that Gear added quality beyond bounded attention,

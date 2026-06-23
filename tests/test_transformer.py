@@ -13,7 +13,7 @@ from lmf.data import (
     ProceduralCorpus,
     SpecialTokenTokenizer,
 )
-from lmf.evaluation import bits_per_token, lm_metrics
+from lmf.evaluation import bits_per_token, lm_metrics, repetition_rate
 from lmf.models.transformer import CachedTransformerLM, TransformerConfig, TransformerTrainer
 
 
@@ -74,6 +74,32 @@ def test_packed_document_segments_are_isolated():
     )
 
 
+def test_single_segment_training_keeps_fused_causal_attention(monkeypatch):
+    model = _model()
+    tokens = torch.randint(0, 64, (2, 16))
+    mask = torch.ones_like(tokens, dtype=torch.bool)
+    segments = torch.arange(2)[:, None].expand_as(tokens)
+    seen_segments = []
+    original = model._full_attn_mask
+
+    def record(attention_mask, segment_ids, length, device):
+        seen_segments.append(segment_ids)
+        return original(attention_mask, segment_ids, length, device)
+
+    monkeypatch.setattr(model, "_full_attn_mask", record)
+    losses = model.training_step(
+        tokens,
+        {
+            "attention_mask": mask,
+            "loss_mask": mask,
+            "segment_ids": segments,
+            "single_segment_rows": True,
+        },
+    )
+    assert torch.isfinite(losses["total"])
+    assert seen_segments == [None]
+
+
 def test_trainer_and_bpt():
     corpus = ProceduralCorpus(vocab_size=64)
     model = _model()
@@ -82,6 +108,20 @@ def test_trainer_and_bpt():
     trainer.train_steps(5, batch_size=4, seq_len=48, log_every=0)
     bpt = bits_per_token(model, corpus, batch_size=2, seq_len=32, n_batches=1)
     assert bpt > 0
+
+
+def test_generic_repetition_metric_accepts_tensor_generation():
+    corpus = ProceduralCorpus(vocab_size=64)
+    rate = repetition_rate(
+        _model(),
+        corpus,
+        batch_size=1,
+        prompt_len=4,
+        gen_len=8,
+        n_batches=1,
+        ngram=2,
+    )
+    assert 0.0 <= rate <= 1.0
 
 
 def test_lm_metrics_include_bits_per_byte_for_decodable_corpus():

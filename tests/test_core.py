@@ -5,7 +5,14 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lmf.core.config import apply_overrides, deep_merge, load_config
+from lmf import models as _models  # noqa: F401
+from lmf.core.build import build
+from lmf.core.config import (
+    ExperimentConfig,
+    apply_overrides,
+    deep_merge,
+    load_config,
+)
 from lmf.core.device import PrecisionPolicy, resolve_device, sync
 from lmf.core.hashing import file_sha256, git_tree_sha256, json_sha256
 from lmf.core.io import atomic_write_json
@@ -105,3 +112,24 @@ def test_atomic_write_json_round_trips(tmp_path):
     atomic_write_json(p, {"a": 1, "b": [1, 2, 3]})
     assert json.loads(p.read_text()) == {"a": 1, "b": [1, 2, 3]}
     assert not p.with_suffix(p.suffix + ".tmp").exists()
+
+
+def test_build_rejects_silent_model_corpus_vocabulary_mismatch():
+    config = ExperimentConfig(
+        {
+            "device": "cpu",
+            "precision": "fp32",
+            "data": {"name": "procedural", "vocab_size": 64},
+            "model": {
+                "name": "transformer",
+                "vocab_size": 32,
+                "dim": 16,
+                "layers": 1,
+                "heads": 2,
+            },
+            "trainer": {"name": "transformer", "total_steps": 1},
+        },
+        "test",
+    )
+    with pytest.raises(ValueError, match="silent vocabulary replacement"):
+        build(config)

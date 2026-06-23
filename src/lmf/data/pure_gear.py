@@ -29,6 +29,40 @@ SPLIT_SEALED = 1
 SPLIT_EXCLUDED = 2
 
 
+_REFACTORED_PATH_PREFIXES = (
+    (
+        Path("outputs/sentencepiece_bpe_prepared"),
+        Path("outputs/tokenizer/sentencepiece_bpe_prepared"),
+    ),
+    (
+        Path("outputs/pure_parallel_gear_360_proxy"),
+        Path("outputs/pure_parallel_gear/360_proxy"),
+    ),
+)
+
+
+def _resolve_manifest_artifact_path(value: str | Path) -> Path:
+    """Resolve artifact paths embedded before the 2026 directory refactor.
+
+    Paired manifests are immutable experiment artifacts, so rewriting them
+    would alter their hashes and break provenance. Resolve the two documented
+    repository moves at load time while preserving the declared path in the
+    manifest itself.
+    """
+    path = Path(value).expanduser()
+    if path.exists() or path.is_absolute():
+        return path
+    for old_prefix, new_prefix in _REFACTORED_PATH_PREFIXES:
+        try:
+            suffix = path.relative_to(old_prefix)
+        except ValueError:
+            continue
+        relocated = new_prefix / suffix
+        if relocated.exists():
+            return relocated
+    return path
+
+
 def _token_hash(tokens: np.ndarray) -> int:
     digest = hashlib.blake2b(
         np.asarray(tokens, dtype=np.uint16).tobytes(),
@@ -626,8 +660,14 @@ class PairedDocumentManifestCorpus:
             raise ValueError("unsupported paired manifest format")
         self.seed = int(seed)
         self.wrap = bool(wrap)
-        self.corpus_root = Path(self.manifest["corpus_root"])
-        self.index_root = Path(self.manifest["index_root"])
+        self.declared_corpus_root = Path(self.manifest["corpus_root"])
+        self.declared_index_root = Path(self.manifest["index_root"])
+        self.corpus_root = _resolve_manifest_artifact_path(
+            self.declared_corpus_root
+        )
+        self.index_root = _resolve_manifest_artifact_path(
+            self.declared_index_root
+        )
         self.source_split = str(
             self.manifest.get("source_split", "train")
         )

@@ -32,23 +32,10 @@ class PureParallelGearTrainer(BaseTrainer):
             raise ValueError("context_fractions must sum to one")
         self.dynamics_lr_multiplier = float(dynamics_lr_multiplier)
         self.dynamics_grad_clip = float(dynamics_grad_clip)
-        # The omega/angle/load "dynamics" parameters drive a recurrence
-        # (settle() updates omega once per chunk, reused by every token's
-        # phase = cumsum(delta + omega) within the next chunk) that is
-        # chained across every sentence/clutch boundary in a sequence --
-        # an RNN-style backprop-through-time chain. Short sequences only
-        # chain a few boundaries together and stay well-conditioned; long
-        # sequences (>=1024 tokens, dozens of chained boundaries) can blow
-        # the gradient up by many orders of magnitude in a handful of
-        # steps. dynamics_grad_clip alone can't prevent this -- it rescales
-        # an already-huge-but-finite gradient, it can't stop the next
-        # step's backward pass from independently producing another one,
-        # and once a single tensor entry overflows to a literal inf no
-        # rescale can recover it. Detecting the early, still-finite blowup
-        # and skipping that one optimizer step (zero grad, no update) is
-        # the standard mitigation for an occasional pathological batch;
-        # repeated skips would mean the instability is persistent, not
-        # transient, so that still escalates to a hard failure.
+        # The boundary-settling dynamics form an RNN-style gradient chain.
+        # Large-but-finite gradients are clipped, but non-finite gradients
+        # are a qualification failure. They must never be hidden by advancing
+        # the token schedule while silently skipping an optimizer update.
         self.gradient_explosion_threshold = float(gradient_explosion_threshold)
         self.max_consecutive_gradient_skips = int(max_consecutive_gradient_skips)
         self._consecutive_gradient_skips = 0
@@ -170,22 +157,11 @@ class PureParallelGearTrainer(BaseTrainer):
             )
             non_finite = not torch.isfinite(torch.tensor(total_norm))
             if non_finite:
-                # Already past fp32's range -- there is no sane direction
-                # left to step in, so this step must be skipped outright.
-                for parameter in all_params:
-                    parameter.grad = None
-                self._consecutive_gradient_skips += 1
-                self.total_gradient_skips += 1
-                if (
-                    self._consecutive_gradient_skips
-                    >= self.max_consecutive_gradient_skips
-                ):
-                    raise FloatingPointError(
-                        "persistent gradient explosion: "
-                        f"{self._consecutive_gradient_skips} consecutive "
-                        "non-finite gradients"
-                    )
-                return torch.tensor(0.0)
+                raise FloatingPointError(
+                    f"non-finite Pure Gear gradient at step {self.step}; "
+                    "optimizer-step skipping is disabled because it "
+                    "invalidates equal-token and time-to-target comparisons"
+                )
             if total_norm > self.gradient_explosion_threshold:
                 # Still finite but clearly past the omega-recurrence's
                 # well-conditioned range. Clipping (not skipping) lets the

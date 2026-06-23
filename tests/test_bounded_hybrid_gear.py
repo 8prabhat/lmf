@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 
 import pytest
 import torch
 
+from lmf.core.config import load_config
 from lmf.core.registry import MODELS, TRAINERS
 from lmf.data import TrainingBatch
 from lmf.models.bounded_hybrid_gear import (
@@ -154,6 +156,23 @@ def test_bounded_hybrid_gear_checkpoint_cannot_cross_architectures(tmp_path):
     block_bank_router = BlockHybridGearV4LM(block_bank_router_config())
     with pytest.raises(RuntimeError, match="architecture-specific"):
         load_checkpoint(path, block_bank_router)
+
+    additive_optimizer = torch.optim.AdamW(
+        block_additive.parameters(), lr=1e-3
+    )
+    additive_path = tmp_path / "block_additive.pt"
+    save_checkpoint(
+        additive_path,
+        block_additive,
+        additive_optimizer,
+        step=0,
+    )
+    with pytest.raises(RuntimeError, match="architecture-specific"):
+        load_checkpoint(
+            additive_path,
+            block_selective_film,
+            strict=False,
+        )
 
 
 def test_associative_scan_matches_sequential_output_and_gradient():
@@ -432,6 +451,22 @@ def test_block_additive_future_state_objective_reaches_every_bank_head():
     )
 
 
+def test_zero_weight_future_objective_is_not_executed(monkeypatch):
+    model = BlockHybridGearV4LM(block_additive_config())
+    tokens = torch.randint(0, 97, (2, 32))
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("zero-weight future objective was executed")
+
+    monkeypatch.setattr(model, "_future_loss", fail_if_called)
+    metrics = model.training_step(
+        tokens,
+        loss_term_scales={"future_state": 0.0},
+    )
+    assert float(metrics["future_state"].detach()) == 0.0
+    metrics["total"].backward()
+
+
 def test_block_memory_changes_only_after_completed_blocks():
     model = BlockHybridGearV4LM(block_additive_config()).eval()
     tokens = torch.randint(0, 97, (1, 8))
@@ -506,6 +541,127 @@ def test_block_bank_router_and_rotor_get_language_model_gradients():
     assert float(memory.bank_router.query.weight.grad.norm()) > 0.0
     assert float(memory.bank_router.value.weight.grad.norm()) > 0.0
     assert float(memory.memory.write_projection.weight.grad.norm()) > 0.0
+
+
+@pytest.mark.parametrize(
+    "factory",
+    (
+        block_additive_config,
+        block_selective_film_config,
+        block_bank_router_config,
+    ),
+)
+def test_block_fast_path_does_not_fuse_context_across_documents(factory):
+    torch.manual_seed(123)
+    config = factory(future_aux_weight=0.0)
+    model = BlockHybridGearV4LM(config).eval()
+    first = torch.randint(0, config.vocab_size, (1, 8))
+    second = torch.randint(0, config.vocab_size, (1, 8))
+    mask = torch.ones_like(first, dtype=torch.bool)
+
+    def metadata(segment: int):
+        return {
+            "segment_ids": torch.full_like(first, segment),
+            "sentence_end_mask": torch.zeros_like(mask),
+            "attention_mask": mask,
+            "loss_mask": mask,
+            "single_segment_rows": True,
+        }
+
+    with torch.no_grad():
+        _, carried = model.stream_training_step(
+            first,
+            task_metadata=metadata(0),
+        )
+        continued, continued_cache = model.stream_training_step(
+            second,
+            cache=carried,
+            task_metadata=metadata(1),
+        )
+        fresh, fresh_cache = model.stream_training_step(
+            second,
+            task_metadata=metadata(1),
+        )
+
+    assert torch.allclose(
+        continued["language_modeling"],
+        fresh["language_modeling"],
+        atol=1e-7,
+        rtol=1e-7,
+    )
+    for continued_memory, fresh_memory in zip(
+        continued_cache.gear_memory,
+        fresh_cache.gear_memory,
+    ):
+        assert torch.allclose(
+            continued_memory.state.rotor,
+            fresh_memory.state.rotor,
+            atol=1e-6,
+            rtol=1e-6,
+        )
+        assert torch.allclose(
+            continued_memory.context,
+            fresh_memory.context,
+            atol=1e-6,
+            rtol=1e-6,
+        )
+
+
+def test_refactored_bounded_hybrid_configs_include_runnable_corpus_defaults():
+    root = Path(__file__).resolve().parents[1]
+    for name in (
+        "bounded_hybrid_gear.yaml",
+        "bounded_hybrid_gear_block_additive.yaml",
+        "bounded_hybrid_gear_block_selective_film.yaml",
+        "bounded_hybrid_gear_block_selective_film_w64.yaml",
+        "bounded_hybrid_gear_block_bank_router.yaml",
+    ):
+        config = load_config(root / "configs" / name)
+        assert config.data["name"] == "pure_gear_contiguous_lanes"
+        for key in (
+            "corpus_root",
+            "index_root",
+            "tokenizer_name",
+            "domains",
+        ):
+            assert config.data.get(key)
+
+
+def test_every_declared_bounded_hybrid_experiment_block_builds():
+    root = Path(__file__).resolve().parents[1]
+    blocks = {
+        "bounded_hybrid_gear.yaml": (
+            "screen",
+            "confirmation",
+            "scale_3m",
+            "scale_15m",
+        ),
+        "bounded_hybrid_gear_block_additive.yaml": (
+            "screen",
+            "confirmation",
+        ),
+        "bounded_hybrid_gear_block_selective_film.yaml": ("screen",),
+        "bounded_hybrid_gear_block_selective_film_w64.yaml": (
+            "screen",
+            "confirmation",
+        ),
+        "bounded_hybrid_gear_block_bank_router.yaml": ("screen",),
+    }
+    for filename, names in blocks.items():
+        for block in names:
+            resolved = load_config(
+                root / "configs" / filename,
+                block=block,
+            )
+            model_config = resolved.model
+            model_name = model_config.pop("name")
+            with torch.device("meta"):
+                instance = MODELS.create(
+                    model_name,
+                    model_config,
+                    4109,
+                )
+            assert instance.config.vocab_size == 4109
 
 
 def test_strict_manifest_and_forward_have_no_host_scalar_control():

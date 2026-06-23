@@ -5,9 +5,10 @@ from __future__ import annotations
 import torch
 
 from lmf.core.registry import MODELS, TRAINERS
-from lmf.data import ProceduralCorpus
+from lmf.data import ProceduralCorpus, TrainingBatch
 from lmf.evaluation import bits_per_token, calibrate_commit_threshold, tokens_per_settle
 from lmf.evaluation.benchmarks import long_context_throughput
+from lmf.evaluation.metrics import _forward_language_model
 from lmf.models.rhca import RHCAConfig, RollingFrontierRHCA, RHCATrainer
 from lmf.training.checkpoints import architecture_fingerprint, load_checkpoint, save_checkpoint
 
@@ -68,3 +69,44 @@ def test_checkpoint_roundtrip(tmp_path):
     assert architecture_fingerprint(fresh) == architecture_fingerprint(model)
     ckpt = load_checkpoint(path, fresh, strict=True)
     assert ckpt["step"] == 7
+
+
+def test_generic_lm_evaluation_forwards_boundary_metadata():
+    class Recorder(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.zeros(()))
+            self.seen = None
+
+        def forward(
+            self,
+            tokens,
+            attention_mask=None,
+            segment_ids=None,
+            sentence_end_mask=None,
+        ):
+            self.seen = (
+                attention_mask,
+                segment_ids,
+                sentence_end_mask,
+            )
+            return torch.zeros(*tokens.shape, 8), None
+
+    tokens = torch.tensor([[1, 2, 3, 4]])
+    attention = torch.ones_like(tokens, dtype=torch.bool)
+    segments = torch.tensor([[0, 0, 1, 1]])
+    boundaries = torch.tensor([[False, True, False, True]])
+    batch = TrainingBatch(
+        tokens,
+        attention,
+        attention,
+        metadata={
+            "segment_ids": segments,
+            "sentence_end_mask": boundaries,
+        },
+    )
+    model = Recorder()
+    _forward_language_model(model, batch)
+    assert model.seen[0] is attention
+    assert model.seen[1] is segments
+    assert model.seen[2] is boundaries

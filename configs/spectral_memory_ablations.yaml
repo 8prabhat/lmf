@@ -1,0 +1,66 @@
+# Spectral Memory ablations — does each piece earn its cost?
+#
+# Each block overrides the smoke shape with one architectural change. Pair with
+# scripts/benchmark_spectral_memory.py (which runs these head-to-head on the
+# ProceduralCorpus long-range echo recall task) or run via the CLI against your
+# prepared corpus. See docs/spectral_memory/spectral_memory.md.
+default_block: full
+
+base:
+  seed: 20262300
+  device: mps
+  precision: fp32
+  data:
+    name: procedural
+    vocab_size: 256
+    echo_distance: 40
+    echo_every: 8
+  trainer:
+    name: spectral_memory
+    betas: [0.9, 0.95]
+    weight_decay: 0.01
+    schedule_mode: steps
+    lr: 3.0e-3
+    warmup_steps: 50
+    total_steps: 600
+  model:
+    name: spectral_memory
+    vocab_size: 256
+    dim: 192
+    layers: 4
+    banks: 4
+    head_dim: 32
+    attn_heads: 4
+    attention_layers: [2]
+    window: 24          # < echo_distance: forces the delta memory (not SWA) to recall
+    chunk: 32
+    mlp_ratio: 2
+    router: sigmoid
+    decay_mode: banded
+  run:
+    batch_size: 16
+    seq_len: 160
+
+# Full model (sigmoid router, banded decay, one attention layer).
+full: {}
+
+# Router ablations.
+router_softmax:
+  model: {router: softmax}
+router_none:
+  model: {router: none}
+
+# Decay-banding ablation (the headline novelty test): structured bands vs the
+# Gated-DeltaNet-style free-range decay.
+free_decay:
+  model: {decay_mode: free}
+
+# Attention-slice ablations.
+pure_linear:           # 0 attention layers
+  model: {attention_layers: []}
+two_attention:
+  model: {attention_layers: [1, 3]}
+
+# Single-bank control (no multi-timescale spectrum).
+single_bank:
+  model: {banks: 1}

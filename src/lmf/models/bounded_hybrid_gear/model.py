@@ -797,16 +797,20 @@ class PureParallelGearV3LM(nn.Module, _LanguageModelLossMixin):
             metadata.get("loss_mask"),
         )
         language_modeling = self._language_modeling_loss(hidden, tokens, valid)
-        future = self._future_loss(records, tokens, token_mask, segment_ids)
         scales = loss_term_scales or {}
         future_scale = float(metadata.get("future_aux_scale", 1.0))
-        total = scales.get("language_modeling", 1.0) * language_modeling
-        total = total + (
+        future_weight = (
             self.config.future_aux_weight
             * future_scale
             * scales.get("future_state", 1.0)
-            * future
         )
+        future = (
+            self._future_loss(records, tokens, token_mask, segment_ids)
+            if future_weight != 0.0
+            else hidden.sum() * 0.0
+        )
+        total = scales.get("language_modeling", 1.0) * language_modeling
+        total = total + future_weight * future
         metrics = {
             "language_modeling": language_modeling,
             "future_state": future,

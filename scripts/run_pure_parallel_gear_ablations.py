@@ -38,6 +38,14 @@ VARIANTS = {
     "one_bank_only": {
         "num_banks": 1,
         "bank_roles": ("single_bank",),
+        # dataclasses.replace() carries every non-overridden field from
+        # `base` (num_banks=4) as-is rather than re-running its None-
+        # sentinel auto-fill -- without resetting these to None too,
+        # __post_init__ rejects base's 4-length future_horizons/
+        # bank_settle_cadence against the new num_banks=1 (caught by
+        # actually running this ablation, not by inspection).
+        "future_horizons": None,
+        "bank_settle_cadence": None,
     },
     "no_boundary_settling": {"boundary_settling": False},
     "no_cross_bank_coupling": {"cross_bank_coupling": False},
@@ -47,6 +55,20 @@ VARIANTS = {
     "no_predictor_gear": {"use_predictor_gear": False},
     "no_local_swiglu": {"use_local_swiglu": False},
     "forced_fixed_boundaries": {"boundary_policy": "fixed"},
+    # Phase 3 mechanisms (this session): unlike the variants above, which
+    # ablate something on by default, future_aux_disabled is the only one
+    # that *removes* a default-on mechanism (the future-rotor auxiliary
+    # loss) -- the other five test turning on an opt-in (default-off)
+    # mechanism, since that is the direction that actually exercises them.
+    "future_aux_disabled": {"future_aux_weight": 0.0},
+    "fast_weight_memory_on": {"use_fast_weight_memory": True},
+    "memory_consolidation_on": {
+        "use_fast_weight_memory": True,
+        "unify_memory_consolidation": True,
+    },
+    "bank_settle_cadence_on": {"bank_settle_cadence": (1, 2, 4, 8)},
+    "adaptive_settling_depth_on": {"adaptive_settling_depth": True},
+    "content_triggered_settling_on": {"content_triggered_settling": True},
 }
 
 
@@ -63,6 +85,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-validation-rows", type=int)
     parser.add_argument("--seed-start", type=int, default=20261300)
     parser.add_argument("--tune-token-fraction", type=float, default=0.02)
+    # Fast-diagnostic-pass overrides: the production protocol (1M tokens,
+    # 5 seeds, a 3-LR sweep per variant) is the right protocol for a
+    # statistically-rigorous quality claim, but is far too slow for an
+    # interactive correctness sweep across many variants. These let a
+    # smaller, faster pass reuse the exact same code path (same model
+    # construction, same training loop, same eval) -- catching crashes,
+    # NaNs, or grossly-wrong behavior cheaply, before committing to the
+    # full protocol's much larger token budget.
+    parser.add_argument("--seeds-override", type=int)
+    parser.add_argument("--tokens-override", type=int)
+    parser.add_argument("--lrs-override", type=float, nargs="+")
+    parser.add_argument("--min-tuning-tokens", type=int, default=100_000)
+    parser.add_argument("--variants", nargs="+", help="Restrict to these variant names")
     return parser.parse_args()
 
 
@@ -117,7 +152,13 @@ def main() -> None:
             raise RuntimeError("MPS ablations require --qualification")
         if not json.loads(args.qualification.read_text()).get("qualified", False):
             raise RuntimeError("engineering qualification did not pass")
-    stage = STAGES[args.stage]
+    stage = dict(STAGES[args.stage])
+    if args.seeds_override is not None:
+        stage["seeds"] = args.seeds_override
+    if args.tokens_override is not None:
+        stage["tokens"] = args.tokens_override
+    if args.lrs_override is not None:
+        stage["lrs"] = tuple(args.lrs_override)
     first_manifest = Path(
         args.train_manifest_template.format(seed=args.seed_start)
     )
@@ -129,9 +170,10 @@ def main() -> None:
             fromlist=["CachedTransformerLM"],
         ).CachedTransformerLM(baseline["transformer"])
     )
+    selected_variant_names = args.variants or list(VARIANTS)
     variants = {
-        name: matched_variant(baseline["gear"], target, overrides)
-        for name, overrides in VARIANTS.items()
+        name: matched_variant(baseline["gear"], target, VARIANTS[name])
+        for name in selected_variant_names
     }
     report = {
         "stage": args.stage,
@@ -140,6 +182,9 @@ def main() -> None:
             "parameter_tolerance": 0.005,
             "equal_lr_search_budget": True,
             "variants": list(variants),
+            "seeds": stage["seeds"],
+            "tokens": stage["tokens"],
+            "lrs": stage["lrs"],
         },
         "parameters": {
             name: count_parameters(PureParallelGearLM(config))
@@ -148,7 +193,7 @@ def main() -> None:
         "runs": [],
     }
     tuning_tokens = max(
-        100_000, int(stage["tokens"] * args.tune_token_fraction)
+        args.min_tuning_tokens, int(stage["tokens"] * args.tune_token_fraction)
     )
     selected_lrs = {}
     for name, config in variants.items():

@@ -66,6 +66,12 @@ def load_checkpoint(path: str | Path, model, optimizer=None,
         if hasattr(model, "architecture_manifest")
         else None
     )
+    saved_version = ckpt.get("manifest", {}).get("version")
+    current_version = (
+        model.architecture_manifest().get("version")
+        if hasattr(model, "architecture_manifest")
+        else None
+    )
     if current_name == "PureParallelGear" and saved_name in {
         "PureParallelRotatingGearLM",
         "PureParallelPredictiveGearV2",
@@ -74,26 +80,42 @@ def load_checkpoint(path: str | Path, model, optimizer=None,
             "legacy Pure Parallel Gear V1/V2 checkpoints are intentionally "
             "incompatible with the canonical PureParallelGear architecture"
         )
-    gear_v3_names = {
+    gear_architecture_names = {
+        "PureParallelGear",
         "PureParallelGearV3",
         "HybridParallelGear",
         "BoundedTransformer",
         "BlockHybridGearV4",
         "SelectiveHybridGearV42",
         "GearBankRouterV43",
+        "BoundedHybridGearBlockAdditive",
+        "BoundedHybridGearBlockSelectiveFiLM",
+        "BoundedHybridGearBlockBankRouter",
     }
     if (
-        current_name in gear_v3_names
+        current_name in gear_architecture_names
         and saved_name is not None
         and saved_name != current_name
     ) or (
-        saved_name in gear_v3_names
+        saved_name in gear_architecture_names
         and current_name is not None
         and current_name != saved_name
     ):
         raise RuntimeError(
             "Pure Gear V2, V3, V4, hybrid, and bounded-Transformer checkpoints "
             "are intentionally architecture-specific and cannot be cross-loaded"
+        )
+    if (
+        current_name in gear_architecture_names
+        and saved_name == current_name
+        and saved_version is not None
+        and current_version is not None
+        and saved_version != current_version
+    ):
+        raise RuntimeError(
+            "Pure Gear checkpoint version mismatch "
+            f"({saved_version} != {current_version}); cross-version loading "
+            "is intentionally disabled"
         )
     if ckpt.get("schema_version") != CHECKPOINT_SCHEMA_VERSION:
         raise ValueError(f"unsupported checkpoint schema {ckpt.get('schema_version')!r}")

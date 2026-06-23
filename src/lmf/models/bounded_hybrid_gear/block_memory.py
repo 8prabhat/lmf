@@ -784,11 +784,31 @@ class BlockGearMemory(nn.Module):
             dim=1,
         )
         if simple_sequence and length % self.block_tokens == 0:
-            context = prior_context.repeat_interleave(
+            # ``simple_sequence`` is the fast path used by whole-document
+            # training lanes. A lane can still switch documents between two
+            # windows, leaving the previous document in ``cache.context``.
+            # Mask that carried context before broadcasting it into the first
+            # block of the new document. The scan itself resets by segment,
+            # but fusion happens from the *prior* state and therefore needs
+            # its own isolation check.
+            prior_is_same_segment = (
+                (prior_segment == block_segment) & block_valid
+            )
+            block_context = (
+                prior_context
+                * prior_is_same_segment[..., None].to(prior_context.dtype)
+            )
+            context = block_context.repeat_interleave(
                 self.block_tokens, dim=1
             )
-            bank_context = prior_bank_context
+            bank_context = (
+                prior_bank_context
+                * prior_is_same_segment[..., None, None].to(
+                    prior_bank_context.dtype
+                )
+            )
         else:
+            block_context = None
             segment_blocks = F.pad(
                 segment_ids,
                 (0, padded_length - length),
@@ -817,7 +837,7 @@ class BlockGearMemory(nn.Module):
         output, modulation_gate = self._fuse(
             hidden,
             context,
-            prior_context if simple_sequence else None,
+            block_context,
             bank_context,
         )
 
@@ -1035,6 +1055,11 @@ class BlockHybridGearV4LM(nn.Module, _LanguageModelLossMixin):
                 for _ in range(config.num_banks)
             ]
         )
+        self.register_buffer(
+            "_future_horizon_offsets",
+            torch.tensor(config.future_horizons, dtype=torch.long),
+            persistent=False,
+        )
         nn.init.normal_(self.token.weight, std=0.02)
 
     def _forward_hidden(
@@ -1195,11 +1220,7 @@ class BlockHybridGearV4LM(nn.Module, _LanguageModelLossMixin):
         block_segment = record["block_segment"]
         block_valid = record["block_valid"]
         block_end = record["block_end_position"]
-        horizons = torch.tensor(
-            self.config.future_horizons,
-            device=tokens.device,
-            dtype=torch.long,
-        )
+        horizons = self._future_horizon_offsets
         target_position = block_end[:, None] + horizons[None]
         within = target_position < tokens.shape[1]
         clamped = target_position.clamp_max(tokens.shape[1] - 1)
@@ -1276,18 +1297,20 @@ class BlockHybridGearV4LM(nn.Module, _LanguageModelLossMixin):
             metadata.get("loss_mask"),
         )
         language_modeling = self._language_modeling_loss(hidden, tokens, valid)
-        future = self._future_loss(
-            records, tokens, token_mask, segment_ids
-        )
         scales = loss_term_scales or {}
         future_scale = float(metadata.get("future_aux_scale", 1.0))
-        total = scales.get("language_modeling", 1.0) * language_modeling
-        total = total + (
+        future_weight = (
             self.config.future_aux_weight
             * future_scale
             * scales.get("future_state", 1.0)
-            * future
         )
+        future = (
+            self._future_loss(records, tokens, token_mask, segment_ids)
+            if future_weight != 0.0
+            else hidden.sum() * 0.0
+        )
+        total = scales.get("language_modeling", 1.0) * language_modeling
+        total = total + future_weight * future
         metrics = {
             "language_modeling": language_modeling,
             "future_state": future,

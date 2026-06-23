@@ -10,14 +10,18 @@ import torch
 import torch.nn.functional as F
 
 from lmf.core.registry import MODELS, TRAINERS
+from lmf.core.config import load_config
+from lmf.core.build import configure_boundary_detector
 from lmf.data import (
     NumericFallbackTokenizer,
     PairedDocumentManifestCorpus,
+    ProceduralCorpus,
     SentenceBoundaryDetector,
     build_document_index,
     build_paired_training_manifest,
 )
 from lmf.models.pure_parallel_gear import (
+    FastWeightMemory,
     GearState,
     PureGearLayer,
     PureParallelGearConfig,
@@ -25,6 +29,7 @@ from lmf.models.pure_parallel_gear import (
     PureParallelGearTrainer,
 )
 from lmf.models.pure_parallel_gear.model import _rotate
+from lmf.data.pure_gear import _resolve_manifest_artifact_path
 from lmf.training.checkpoints import load_checkpoint
 from scripts.benchmark_pure_parallel_gear import (
     assert_fair_configs,
@@ -87,6 +92,57 @@ def test_only_canonical_gear_family_is_registered():
     source = inspect.getsource(PureGearLayer)
     assert "scaled_dot_product_attention" not in source
     assert "softmax" not in source
+
+
+def test_pure_parallel_gear_config_uses_real_paired_data_and_common_precision():
+    root = Path(__file__).resolve().parents[1]
+    resolved = load_config(root / "configs" / "pure_parallel_gear.yaml")
+    assert resolved.get("precision") == "fp32"
+    assert resolved.data["name"] == "paired_document_manifest"
+    assert resolved.data["manifest_root"].startswith(
+        "outputs/pure_parallel_gear/"
+    )
+    assert resolved.data["wrap"] is True
+
+
+def test_pre_refactor_manifest_paths_resolve_without_rewriting_artifacts(
+    tmp_path,
+    monkeypatch,
+):
+    relocated = (
+        tmp_path
+        / "outputs"
+        / "tokenizer"
+        / "sentencepiece_bpe_prepared"
+    )
+    relocated.mkdir(parents=True)
+    monkeypatch.chdir(tmp_path)
+    assert _resolve_manifest_artifact_path(
+        "outputs/sentencepiece_bpe_prepared"
+    ) == Path("outputs/tokenizer/sentencepiece_bpe_prepared")
+
+
+def test_nonfinite_pure_gear_gradients_fail_instead_of_skipping():
+    instance = model(layers=1)
+    trainer = PureParallelGearTrainer(
+        instance,
+        ProceduralCorpus(vocab_size=97, seed=1),
+        device="cpu",
+        precision="fp32",
+        total_steps=1,
+    )
+    parameter = next(instance.parameters())
+    parameter.grad = torch.full_like(parameter, float("inf"))
+    with pytest.raises(FloatingPointError, match="skipping is disabled"):
+        trainer.clip_gradients()
+    assert trainer.total_gradient_skips == 0
+
+
+def test_shared_builder_configures_pure_gear_generation_boundaries():
+    instance = model()
+    tokenizer = NumericFallbackTokenizer(instance.config.vocab_size)
+    assert configure_boundary_detector(instance, tokenizer) is True
+    assert instance._boundary_detector is not None
 
 
 def test_closed_form_rotor_matches_sequential_output_and_gradient():
@@ -222,10 +278,11 @@ def test_long_sentence_receives_explicit_intra_sentence_clutch():
 def test_production_forward_uses_sentence_scan_not_token_loop():
     source = inspect.getsource(PureGearLayer.forward)
     assert "for t in range(length)" not in source
-    assert (
-        model().architecture_manifest()["invariants"]["sentence_execution"]
-        == "parallel_affine_scan"
+    manifest = model().architecture_manifest()
+    assert manifest["invariants"]["sentence_execution"] == (
+        "parallel_affine_scan_with_sequential_boundary_settling"
     )
+    assert manifest["invariants"]["host_scalar_control_flow"] is True
 
 
 def test_full_and_streaming_logits_match_with_constant_cache():
@@ -411,7 +468,26 @@ def _legacy_forward_row(layer, hidden, token_mask, segment_ids, sentence_end_mas
         rotor_energy.append(rotor.square().sum(dim=-1))
         clutch_rows.append(clutch)
         coupling_rows.append(coupling)
-        state = next_state
+        # Production's _forward_batched clips the gradient crossing every
+        # chunk-step boundary (see PureGearLayer._clip_recurrent_gradient);
+        # mirror that here so this reference stays an apples-to-apples
+        # ground truth instead of comparing a protected path against an
+        # unprotected one. `.clone()` first: when no settle fires,
+        # next_state.omega/load is literally the same tensor object as the
+        # previous iteration's (no settle = no new computation), so without
+        # forcing a fresh identity here, register_hook would stack multiple
+        # hooks on one node across a run of non-settling chunks instead of
+        # one hook per chunk-step boundary -- production never has this
+        # issue since omega_in/load_in are always freshly built every step
+        # (`.expand(...).clone()` then `torch.where(...)`) regardless of
+        # whether settle changes the value.
+        state = GearState(
+            layer._clip_recurrent_gradient(next_state.rotor.clone()),
+            layer._clip_recurrent_gradient(next_state.omega.clone()),
+            layer._clip_recurrent_gradient(next_state.load.clone()),
+            next_state.sentence_length,
+            next_state.segment_id,
+        )
         position = stop
     output = torch.stack(outputs, dim=0)
     energy = torch.cat(rotor_energy, dim=0)
@@ -509,8 +585,19 @@ def test_vectorized_forward_matches_legacy_row_loop():
     )
 
     assert torch.allclose(new_output, ref_output, atol=1e-5, rtol=1e-5)
-    assert torch.allclose(new_record["rotor_energy"], ref_record["rotor_energy"], atol=1e-5, rtol=1e-5)
-    assert torch.allclose(new_record["clutch"], ref_record["clutch"], atol=1e-6, rtol=1e-6)
+    # rotor_energy/clutch are consumed only via .mean() over every valid
+    # token, never zipped against a token's position -- see the equivalent
+    # comment in test_chunk_parallel_forward_matches_legacy_chunked_loop.
+    assert torch.allclose(
+        new_record["rotor_energy"].reshape(-1).sort().values,
+        ref_record["rotor_energy"].reshape(-1).sort().values,
+        atol=1e-5, rtol=1e-5,
+    )
+    assert torch.allclose(
+        new_record["clutch"].reshape(-1).sort().values,
+        ref_record["clutch"].reshape(-1).sort().values,
+        atol=1e-6, rtol=1e-6,
+    )
     assert torch.allclose(new_state.rotor, ref_state.rotor, atol=1e-5, rtol=1e-5)
     assert torch.allclose(new_state.omega, ref_state.omega, atol=1e-5, rtol=1e-5)
     assert torch.allclose(new_state.load, ref_state.load, atol=1e-5, rtol=1e-5)
@@ -662,7 +749,18 @@ def _legacy_chunked_forward_row(
         rotor_rows.append(rotor.square().sum(dim=-1))
         clutch_rows.append(clutch)
         retention_rows.append(retention)
-        state = next_state
+        # Mirror PureGearLayer._clip_recurrent_gradient's per-chunk-step
+        # clip here too (see the equivalent comment, including the
+        # `.clone()` rationale, in _legacy_forward_row) -- otherwise this
+        # reference is comparing a protected production path against an
+        # unprotected one.
+        state = GearState(
+            layer._clip_recurrent_gradient(next_state.rotor.clone()),
+            layer._clip_recurrent_gradient(next_state.omega.clone()),
+            layer._clip_recurrent_gradient(next_state.load.clone()),
+            next_state.sentence_length,
+            next_state.segment_id,
+        )
         position = stop
 
     output = torch.stack(outputs, dim=0)
@@ -902,13 +1000,19 @@ def test_chunk_parallel_forward_matches_legacy_chunked_loop(case):
     )
 
     assert torch.allclose(new_gear_output, ref_gear_output, atol=1e-5, rtol=1e-5)
-    assert torch.allclose(
-        new_record["rotor_energy"], ref_record["rotor_energy"], atol=1e-5, rtol=1e-5
-    )
-    assert torch.allclose(new_record["clutch"], ref_record["clutch"], atol=1e-6, rtol=1e-6)
-    assert torch.allclose(
-        new_record["retention"], ref_record["retention"], atol=1e-6, rtol=1e-6
-    )
+    # rotor_energy/clutch/retention are consumed only via .mean() over every
+    # valid token (training_step's regularizer terms) -- never zipped against
+    # a token's position -- so the vectorized path collecting them in
+    # step-then-active-row order instead of the legacy per-row-then-chunk
+    # order is exactly equivalent. Compare as sorted multisets.
+    for key, atol, rtol in (
+        ("rotor_energy", 1e-5, 1e-5),
+        ("clutch", 1e-6, 1e-6),
+        ("retention", 1e-6, 1e-6),
+    ):
+        new_sorted = new_record[key].reshape(-1).sort().values
+        ref_sorted = ref_record[key].reshape(-1).sort().values
+        assert torch.allclose(new_sorted, ref_sorted, atol=atol, rtol=rtol)
     assert torch.allclose(
         new_record["coupling_activity"], ref_record["coupling_activity"], atol=1e-6
     )
@@ -921,6 +1025,258 @@ def test_chunk_parallel_forward_matches_legacy_chunked_loop(case):
     new_gear_output.square().sum().backward()
     ref_gear_output.square().sum().backward()
     assert torch.allclose(hidden.grad, hidden_ref.grad, atol=2e-4, rtol=2e-4)
+
+
+def _make_segment_scan_scenario(case: str):
+    """Same scenario shapes as `_make_chunk_parallel_scenario`, plus cases
+    specific to the segment-scan reset/settle boundary math (zero/all
+    boundaries, boundary on the first/last token, banks=1) -- but every
+    layer here is built with learned_angular_velocity=False, the only
+    configuration `_forward_segment_scan` is valid for."""
+    torch.manual_seed(11)
+    if case == "basic_multi_segment":
+        layer = model(
+            layers=1, max_sentence_tokens=20, intra_sentence_clutch_tokens=5,
+            learned_angular_velocity=False,
+        ).layers[0]
+        batch, length = 4, 47
+        token_mask = torch.ones(batch, length, dtype=torch.bool)
+        token_mask[0, 30:33] = False
+        token_mask[3, :4] = False
+        segment_ids = torch.zeros(batch, length, dtype=torch.long)
+        segment_ids[1, 25:] = 1
+        segment_ids[2, 10:] = 1
+        segment_ids[2, 35:] = 2
+        sentence_end_mask = torch.zeros(batch, length, dtype=torch.bool)
+        sentence_end_mask[0, 7] = True
+        sentence_end_mask[1, 12] = True
+        sentence_end_mask[1, 40] = True
+        sentence_end_mask[2, 22] = True
+    elif case == "clutch_disabled":
+        layer = model(
+            layers=1, max_sentence_tokens=6, intra_sentence_clutch_tokens=0,
+            learned_angular_velocity=False,
+        ).layers[0]
+        batch, length = 3, 29
+        token_mask = torch.ones(batch, length, dtype=torch.bool)
+        segment_ids = torch.zeros(batch, length, dtype=torch.long)
+        sentence_end_mask = torch.zeros(batch, length, dtype=torch.bool)
+        sentence_end_mask[0, 4] = True
+        sentence_end_mask[1, 9] = True
+        sentence_end_mask[1, 18] = True
+    elif case == "segment_change_at_start_and_end":
+        layer = model(
+            layers=1, max_sentence_tokens=20, intra_sentence_clutch_tokens=5,
+            learned_angular_velocity=False,
+        ).layers[0]
+        batch, length = 2, 25
+        token_mask = torch.ones(batch, length, dtype=torch.bool)
+        segment_ids = torch.zeros(batch, length, dtype=torch.long)
+        segment_ids[0, :] = 1
+        segment_ids[1, -1:] = 2
+        sentence_end_mask = torch.zeros(batch, length, dtype=torch.bool)
+        sentence_end_mask[0, 10] = True
+    elif case == "all_masked_row":
+        layer = model(
+            layers=1, max_sentence_tokens=20, intra_sentence_clutch_tokens=5,
+            learned_angular_velocity=False,
+        ).layers[0]
+        batch, length = 3, 18
+        token_mask = torch.ones(batch, length, dtype=torch.bool)
+        token_mask[1, :] = False
+        segment_ids = torch.zeros(batch, length, dtype=torch.long)
+        sentence_end_mask = torch.zeros(batch, length, dtype=torch.bool)
+        sentence_end_mask[0, 8] = True
+    elif case == "interleaved_masking":
+        layer = model(
+            layers=1, max_sentence_tokens=9, intra_sentence_clutch_tokens=3,
+            learned_angular_velocity=False,
+        ).layers[0]
+        batch, length = 2, 22
+        token_mask = torch.ones(batch, length, dtype=torch.bool)
+        token_mask[0, 5] = False
+        token_mask[0, 6] = False
+        token_mask[1, 10:13] = False
+        segment_ids = torch.zeros(batch, length, dtype=torch.long)
+        sentence_end_mask = torch.zeros(batch, length, dtype=torch.bool)
+        sentence_end_mask[1, 7] = True
+    elif case == "zero_boundaries":
+        layer = model(
+            layers=1, max_sentence_tokens=1000, intra_sentence_clutch_tokens=0,
+            learned_angular_velocity=False,
+        ).layers[0]
+        batch, length = 2, 13
+        token_mask = torch.ones(batch, length, dtype=torch.bool)
+        segment_ids = torch.zeros(batch, length, dtype=torch.long)
+        sentence_end_mask = torch.zeros(batch, length, dtype=torch.bool)
+    elif case == "boundary_on_first_token":
+        layer = model(
+            layers=1, max_sentence_tokens=1000, intra_sentence_clutch_tokens=0,
+            learned_angular_velocity=False,
+        ).layers[0]
+        batch, length = 2, 9
+        token_mask = torch.ones(batch, length, dtype=torch.bool)
+        segment_ids = torch.zeros(batch, length, dtype=torch.long)
+        sentence_end_mask = torch.zeros(batch, length, dtype=torch.bool)
+        sentence_end_mask[:, 0] = True
+    elif case == "boundary_on_last_token":
+        layer = model(
+            layers=1, max_sentence_tokens=1000, intra_sentence_clutch_tokens=0,
+            learned_angular_velocity=False,
+        ).layers[0]
+        batch, length = 2, 9
+        token_mask = torch.ones(batch, length, dtype=torch.bool)
+        segment_ids = torch.zeros(batch, length, dtype=torch.long)
+        sentence_end_mask = torch.zeros(batch, length, dtype=torch.bool)
+        sentence_end_mask[:, -1] = True
+    elif case == "all_boundary":
+        layer = model(
+            layers=1, max_sentence_tokens=1000, intra_sentence_clutch_tokens=0,
+            learned_angular_velocity=False,
+        ).layers[0]
+        batch, length = 2, 9
+        token_mask = torch.ones(batch, length, dtype=torch.bool)
+        segment_ids = torch.zeros(batch, length, dtype=torch.long)
+        sentence_end_mask = torch.ones(batch, length, dtype=torch.bool)
+    elif case == "banks_one":
+        layer = model(
+            layers=1, num_banks=1, max_sentence_tokens=5,
+            intra_sentence_clutch_tokens=2, learned_angular_velocity=False,
+        ).layers[0]
+        batch, length = 2, 11
+        token_mask = torch.ones(batch, length, dtype=torch.bool)
+        segment_ids = torch.zeros(batch, length, dtype=torch.long)
+        sentence_end_mask = torch.zeros(batch, length, dtype=torch.bool)
+        sentence_end_mask[:, 4] = True
+    else:
+        raise ValueError(case)
+    hidden = torch.randn(batch, length, layer.dim, requires_grad=True)
+    return layer, hidden, token_mask, segment_ids, sentence_end_mask
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "basic_multi_segment",
+        "clutch_disabled",
+        "single_row",
+        "segment_change_at_start_and_end",
+        "all_masked_row",
+        "interleaved_masking",
+        "zero_boundaries",
+        "boundary_on_first_token",
+        "boundary_on_last_token",
+        "all_boundary",
+        "banks_one",
+    ],
+)
+def test_segment_scan_matches_batched_reference_when_omega_fixed(case):
+    """segment_scan_proof: `_forward_segment_scan` is only valid when omega
+    is fixed (see segment_scan.py's module docstring) -- exercised here
+    against `_forward_batched` with fixed_omega=True forced, across the
+    same edge cases the legacy-loop parity tests use, plus boundary-density
+    extremes (zero/all boundaries, boundary on the first/last token) and a
+    banks=1 topology, since those are exactly where reset-mask/cummax-
+    baseline bookkeeping is most likely to go wrong.
+    """
+    if case == "single_row":
+        torch.manual_seed(11)
+        layer = model(
+            layers=1, max_sentence_tokens=20, intra_sentence_clutch_tokens=5,
+            learned_angular_velocity=False,
+        ).layers[0]
+        batch, length = 1, 31
+        token_mask = torch.ones(batch, length, dtype=torch.bool)
+        segment_ids = torch.zeros(batch, length, dtype=torch.long)
+        sentence_end_mask = torch.zeros(batch, length, dtype=torch.bool)
+        sentence_end_mask[0, 14] = True
+        hidden = torch.randn(batch, length, layer.dim, requires_grad=True)
+    else:
+        layer, hidden, token_mask, segment_ids, sentence_end_mask = (
+            _make_segment_scan_scenario(case)
+        )
+    hidden_ref = hidden.detach().clone().requires_grad_(True)
+    batch = hidden.shape[0]
+
+    new_output, new_state, new_record = layer._forward_segment_scan(
+        hidden,
+        token_mask,
+        segment_ids,
+        sentence_end_mask,
+        layer.initial_state(batch, hidden.device),
+        settling_enabled=True,
+        cross_bank=True,
+        commuting_only=False,
+        use_load=True,
+    )
+    ref_output, ref_state, ref_record = layer._forward_batched(
+        hidden_ref.float(),
+        token_mask.detach().to(device="cpu", dtype=torch.bool),
+        segment_ids.detach().to(device="cpu", dtype=torch.long),
+        sentence_end_mask.detach().to(device="cpu", dtype=torch.bool),
+        layer.initial_state(batch, hidden.device),
+        fixed_omega=True,
+        settling_enabled=True,
+        cross_bank=True,
+        commuting_only=False,
+        use_load=True,
+    )
+
+    assert torch.allclose(new_output, ref_output, atol=1e-4, rtol=1e-4)
+    for key in ("rotor_energy", "clutch", "retention"):
+        new_sorted = new_record[key].reshape(-1).sort().values
+        ref_sorted = ref_record[key].reshape(-1).sort().values
+        assert torch.allclose(new_sorted, ref_sorted, atol=1e-4, rtol=1e-4)
+    assert torch.allclose(
+        new_record["coupling_activity"], ref_record["coupling_activity"], atol=1e-5
+    )
+    assert torch.allclose(new_state.rotor, ref_state.rotor, atol=1e-4, rtol=1e-4)
+    assert torch.allclose(new_state.omega, ref_state.omega, atol=1e-4, rtol=1e-4)
+    assert torch.allclose(new_state.load, ref_state.load, atol=1e-4, rtol=1e-4)
+    assert torch.equal(new_state.sentence_length, ref_state.sentence_length)
+    assert torch.equal(new_state.segment_id, ref_state.segment_id)
+
+    new_output.square().sum().backward()
+    ref_output.square().sum().backward()
+    assert torch.allclose(hidden.grad, hidden_ref.grad, atol=2e-4, rtol=2e-4)
+
+
+def test_segment_scan_falls_back_when_omega_is_learned():
+    """forward() must only dispatch to the (omega-fixed-only) segment-scan
+    path when fixed_omega actually holds at runtime -- use_segment_scan=True
+    with the default learned_angular_velocity=True must silently fall back
+    to `_forward_batched`, not silently compute the wrong thing."""
+    torch.manual_seed(5)
+    config_scan = config(
+        layers=1, max_sentence_tokens=6, intra_sentence_clutch_tokens=2,
+        use_segment_scan=True,
+    )
+    config_plain = config(
+        layers=1, max_sentence_tokens=6, intra_sentence_clutch_tokens=2,
+        use_segment_scan=False,
+    )
+    assert config_scan.learned_angular_velocity is True
+    layer_scan = PureParallelGearLM(config_scan).layers[0]
+    layer_plain = PureParallelGearLM(config_plain).layers[0]
+    layer_plain.load_state_dict(layer_scan.state_dict())
+
+    batch, length = 2, 17
+    hidden = torch.randn(batch, length, layer_scan.dim, requires_grad=True)
+    token_mask = torch.ones(batch, length, dtype=torch.bool)
+    segment_ids = torch.zeros(batch, length, dtype=torch.long)
+    sentence_end_mask = torch.zeros(batch, length, dtype=torch.bool)
+    sentence_end_mask[:, ::5] = True
+
+    out_scan, state_scan, _ = layer_scan(
+        hidden, token_mask=token_mask, segment_ids=segment_ids,
+        sentence_end_mask=sentence_end_mask,
+    )
+    out_plain, state_plain, _ = layer_plain(
+        hidden, token_mask=token_mask, segment_ids=segment_ids,
+        sentence_end_mask=sentence_end_mask,
+    )
+    assert torch.allclose(out_scan, out_plain, atol=1e-5, rtol=1e-5)
+    assert torch.allclose(state_scan.omega, state_plain.omega, atol=1e-5, rtol=1e-5)
 
 
 def _legacy_settle(layer, state, *, cross_bank=True, commuting_only=False, use_load=True):
@@ -1024,6 +1380,517 @@ def test_vectorized_settle_matches_legacy_pair_loop(gears, banks):
     assert torch.allclose(load.grad, load_ref.grad, atol=2e-4, rtol=2e-4)
 
 
+def test_bank_settle_cadence_defaults_to_every_boundary():
+    assert config(num_banks=3).bank_settle_cadence == (1, 1, 1)
+
+
+def test_bank_settle_cadence_validates_length_and_positivity():
+    with pytest.raises(ValueError):
+        config(num_banks=2, bank_settle_cadence=(1, 2, 4))
+    with pytest.raises(ValueError):
+        config(num_banks=2, bank_settle_cadence=(1, 0))
+
+
+def test_bank_settle_cadence_freezes_off_cadence_bank_exactly():
+    """A bank whose cadence isn't met this event must come out of settle()
+    bit-for-bit identical to how it went in -- not just "barely mixed" --
+    since gear-ratio cadence (Phase 3.2) means that bank is fully
+    disengaged this cycle, the same way a real gear that isn't meshed
+    simply doesn't turn."""
+    torch.manual_seed(5)
+    layer = model(
+        layers=1, num_banks=2, gears_per_bank=4, bank_settle_cadence=(1, 2)
+    ).layers[0]
+    batch = 3
+    state = layer.initial_state(batch, torch.device("cpu"))
+    rotor = state.rotor + 0.2 * torch.randn_like(state.rotor)
+    omega = state.omega + 0.05 * torch.randn_like(state.omega)
+    load = 0.1 * torch.randn_like(state.load)
+
+    # boundary_count=1: bank 0 (cadence 1) active (1 % 1 == 0), bank 1
+    # (cadence 2) inactive (1 % 2 == 1 != 0).
+    boundary_count = torch.ones(batch, dtype=torch.long)
+    settled, _ = layer.settle(
+        GearState(rotor, omega, load, state.sentence_length, state.segment_id, boundary_count)
+    )
+
+    assert torch.equal(settled.rotor[:, 1], rotor[:, 1])
+    assert torch.equal(settled.omega[:, 1], omega[:, 1])
+    assert torch.equal(settled.load[:, 1], load[:, 1])
+    assert not torch.equal(settled.rotor[:, 0], rotor[:, 0])
+    # boundary_count carries through settle() unchanged -- incrementing it
+    # is the caller's job (the forward methods), not settle()'s.
+    assert torch.equal(settled.boundary_count, boundary_count)
+
+    # boundary_count=2: bank 1 (cadence 2) is now active (2 % 2 == 0) too.
+    boundary_count_2 = torch.full((batch,), 2, dtype=torch.long)
+    settled_2, _ = layer.settle(
+        GearState(rotor, omega, load, state.sentence_length, state.segment_id, boundary_count_2)
+    )
+    assert not torch.equal(settled_2.rotor[:, 1], rotor[:, 1])
+
+
+def test_bank_settle_cadence_no_gating_when_boundary_count_is_none():
+    """Without a real boundary_count (e.g. a caller that never tracked
+    one), settle() must behave exactly as if bank_settle_cadence weren't
+    set at all -- gating requires genuine cadence information, not a
+    default stand-in."""
+    torch.manual_seed(5)
+    layer = model(
+        layers=1, num_banks=2, gears_per_bank=4, bank_settle_cadence=(1, 4)
+    ).layers[0]
+    batch = 2
+    state = layer.initial_state(batch, torch.device("cpu"))
+    rotor = state.rotor + 0.2 * torch.randn_like(state.rotor)
+    omega = state.omega + 0.05 * torch.randn_like(state.omega)
+    load = 0.1 * torch.randn_like(state.load)
+
+    settled, _ = layer.settle(
+        GearState(rotor, omega, load, state.sentence_length, state.segment_id, None)
+    )
+    assert not torch.equal(settled.rotor[:, 1], rotor[:, 1])
+
+
+def test_forward_batched_and_segment_scan_agree_with_bank_settle_cadence():
+    """Both forward paths independently track and gate boundary_count
+    (Phase 3.2) -- this extends the established segment-scan-vs-batched
+    parity check (test_segment_scan_matches_batched_reference_when_omega_
+    fixed) to confirm they stay in lockstep for this new mechanism too,
+    not just the original forward math."""
+    layer = model(
+        layers=1,
+        num_banks=2,
+        max_sentence_tokens=6,
+        intra_sentence_clutch_tokens=2,
+        learned_angular_velocity=False,
+        bank_settle_cadence=(1, 3),
+    ).layers[0]
+    batch, length = 2, 40
+    token_mask = torch.ones(batch, length, dtype=torch.bool)
+    segment_ids = torch.zeros(batch, length, dtype=torch.long)
+    sentence_end_mask = torch.zeros(batch, length, dtype=torch.bool)
+    sentence_end_mask[:, ::6] = True
+    hidden = torch.randn(batch, length, layer.dim, requires_grad=True)
+    hidden_ref = hidden.detach().clone().requires_grad_(True)
+
+    new_output, new_state, _ = layer._forward_segment_scan(
+        hidden,
+        token_mask,
+        segment_ids,
+        sentence_end_mask,
+        layer.initial_state(batch, hidden.device),
+        settling_enabled=True,
+        cross_bank=True,
+        commuting_only=False,
+        use_load=True,
+    )
+    ref_output, ref_state, _ = layer._forward_batched(
+        hidden_ref.float(),
+        token_mask,
+        segment_ids,
+        sentence_end_mask,
+        layer.initial_state(batch, hidden.device),
+        fixed_omega=True,
+        settling_enabled=True,
+        cross_bank=True,
+        commuting_only=False,
+        use_load=True,
+    )
+
+    assert torch.allclose(new_output, ref_output, atol=1e-4, rtol=1e-4)
+    assert torch.allclose(new_state.rotor, ref_state.rotor, atol=1e-4, rtol=1e-4)
+    assert torch.allclose(new_state.omega, ref_state.omega, atol=1e-4, rtol=1e-4)
+    assert torch.allclose(new_state.load, ref_state.load, atol=1e-4, rtol=1e-4)
+    assert torch.equal(new_state.boundary_count, ref_state.boundary_count)
+    # With max_sentence_tokens=6 over a 40-token sequence, bank 1's
+    # cadence=3 should actually have come into play at least once --
+    # otherwise this test wouldn't be exercising what it claims to.
+    assert bool((ref_state.boundary_count >= 3).any())
+
+
+def test_adaptive_settling_depth_defaults_off_and_uses_buffers():
+    layer = model(num_banks=2).layers[0]
+    assert layer.config.adaptive_settling_depth is False
+    assert not isinstance(layer.depth_response, torch.nn.Parameter)
+    assert not isinstance(layer.depth_threshold, torch.nn.Parameter)
+
+    enabled_layer = model(num_banks=2, adaptive_settling_depth=True).layers[0]
+    assert isinstance(enabled_layer.depth_response, torch.nn.Parameter)
+    assert isinstance(enabled_layer.depth_threshold, torch.nn.Parameter)
+
+
+def test_round_depth_gate_is_none_for_round_zero_and_when_disabled():
+    layer = model(num_banks=2, adaptive_settling_depth=True).layers[0]
+    log_energy = torch.zeros(2, 2)
+    assert layer._round_depth_gate(log_energy, 0) is None
+    assert layer._round_depth_gate(log_energy, 1) is not None
+
+    off_layer = model(num_banks=2, adaptive_settling_depth=False).layers[0]
+    assert off_layer._round_depth_gate(log_energy, 1) is None
+
+
+def test_adaptive_settling_depth_low_energy_bank_matches_single_round():
+    """A bank whose rotor energy at entry is far below depth_threshold
+    should get round 0 only -- every later round's contribution should be
+    blended away to (numerically) nothing -- so settle() with
+    settling_rounds=3 should match a plain settling_rounds=1 layer exactly,
+    for that bank, given identical mixing parameters."""
+    torch.manual_seed(21)
+    gated_layer = model(
+        layers=1, num_banks=2, gears_per_bank=4, settling_rounds=3,
+        adaptive_settling_depth=True,
+    ).layers[0]
+    with torch.no_grad():
+        gated_layer.depth_response.fill_(8.0)
+        gated_layer.depth_threshold.fill_(50.0)
+
+    torch.manual_seed(21)
+    single_round_layer = model(
+        layers=1, num_banks=2, gears_per_bank=4, settling_rounds=1,
+        adaptive_settling_depth=False,
+    ).layers[0]
+
+    state = gated_layer.initial_state(2, torch.device("cpu"))
+    # Scaled down so log_energy is deep in clamp(-4, 4)'s lower bound,
+    # making depth_response * log_energy - depth_threshold * k very
+    # negative for every later round, for both banks.
+    rotor = (state.rotor + 0.05 * torch.randn_like(state.rotor)) * 0.01
+    gear_state = GearState(
+        rotor, state.omega.clone(), state.load.clone(),
+        state.sentence_length, state.segment_id,
+    )
+
+    gated_settled, _ = gated_layer.settle(gear_state)
+    single_settled, _ = single_round_layer.settle(gear_state)
+
+    assert torch.allclose(gated_settled.rotor, single_settled.rotor, atol=1e-5)
+    assert torch.allclose(gated_settled.omega, single_settled.omega, atol=1e-5)
+    assert torch.allclose(gated_settled.load, single_settled.load, atol=1e-5)
+
+
+def test_adaptive_settling_depth_high_energy_bank_uses_extra_rounds():
+    """A bank whose rotor energy at entry is far above depth_threshold for
+    every round should behave like every round fully fired -- i.e. match a
+    plain (non-adaptive) layer with the same settling_rounds exactly."""
+    torch.manual_seed(21)
+    gated_layer = model(
+        layers=1, num_banks=2, gears_per_bank=4, settling_rounds=3,
+        adaptive_settling_depth=True,
+    ).layers[0]
+    with torch.no_grad():
+        gated_layer.depth_response.fill_(8.0)
+        gated_layer.depth_threshold.fill_(0.5)
+
+    torch.manual_seed(21)
+    full_round_layer = model(
+        layers=1, num_banks=2, gears_per_bank=4, settling_rounds=3,
+        adaptive_settling_depth=False,
+    ).layers[0]
+
+    state = gated_layer.initial_state(2, torch.device("cpu"))
+    # Scaled up so log_energy is large and positive, making
+    # depth_response * log_energy - depth_threshold * k stay strongly
+    # positive through every round, for both banks.
+    rotor = (state.rotor + 0.05 * torch.randn_like(state.rotor)) * 5.0
+    gear_state = GearState(
+        rotor, state.omega.clone(), state.load.clone(),
+        state.sentence_length, state.segment_id,
+    )
+
+    gated_settled, _ = gated_layer.settle(gear_state)
+    full_settled, _ = full_round_layer.settle(gear_state)
+
+    assert torch.allclose(gated_settled.rotor, full_settled.rotor, atol=1e-4)
+    assert torch.allclose(gated_settled.omega, full_settled.omega, atol=1e-4)
+    assert torch.allclose(gated_settled.load, full_settled.load, atol=1e-4)
+
+
+def test_adaptive_settling_depth_parameter_count_matches_formula():
+    proxy_config = config(num_banks=2, adaptive_settling_depth=True)
+    instance = PureParallelGearLM(proxy_config)
+    real_total = sum(p.numel() for p in instance.parameters())
+    assert gear_parameter_count(proxy_config) == real_total
+
+
+def test_content_trigger_config_validates():
+    with pytest.raises(ValueError):
+        config(content_settle_threshold=0.0)
+    with pytest.raises(ValueError):
+        config(content_settle_threshold=1.0)
+    with pytest.raises(ValueError):
+        config(content_settle_min_gap=0)
+    with pytest.raises(ValueError):
+        # Threshold must exceed clutch_target_mean -- an explicit value at
+        # or below it would fire on the typical/majority case, not just
+        # unusually high-content tokens.
+        config(content_settle_threshold=0.3, clutch_target_mean=0.35)
+
+
+def test_content_settle_threshold_defaults_relative_to_clutch_target_mean():
+    # Found via a real ablation run: a fixed absolute default (the
+    # original implementation used 0.5) is disconnected from
+    # clutch_target_mean, the knob that actually sets clutch's calibrated
+    # center, making the trigger unreachable for the project's default
+    # clutch_target_mean=0.35 and would fire on a majority of tokens by
+    # default for any clutch_target_mean above 0.5. The default must
+    # track clutch_target_mean instead of being a disconnected constant.
+    low = config(clutch_target_mean=0.20)
+    mid = config(clutch_target_mean=0.35)
+    high = config(clutch_target_mean=0.80)
+    assert low.content_settle_threshold > low.clutch_target_mean
+    assert mid.content_settle_threshold > mid.clutch_target_mean
+    assert high.content_settle_threshold > high.clutch_target_mean
+    assert low.content_settle_threshold < mid.content_settle_threshold < (
+        high.content_settle_threshold
+    )
+    assert high.content_settle_threshold < 1.0
+
+
+def test_content_trigger_is_none_when_disabled():
+    layer = model(num_banks=2).layers[0]
+    clutch = torch.ones(2, 10, layer.banks, layer.gears, layer.channels)
+    assert layer._content_trigger(clutch) is None
+
+
+def test_chunk_plan_honors_content_trigger_with_min_gap_floor():
+    layer = model(
+        num_banks=2, max_sentence_tokens=1000, intra_sentence_clutch_tokens=0,
+        content_triggered_settling=True, content_settle_threshold=0.5,
+        content_settle_min_gap=3,
+    ).layers[0]
+    token_mask_row = torch.ones(20, dtype=torch.bool)
+    segment_ids_row = torch.zeros(20, dtype=torch.long)
+    sentence_end_mask_row = torch.zeros(20, dtype=torch.bool)
+    content_trigger_row = torch.zeros(20, dtype=torch.bool)
+    content_trigger_row[1] = True  # too close to start (1 - 0 + 1 = 2 < min_gap)
+    content_trigger_row[7] = True  # honored (7 - 0 + 1 = 8 >= min_gap)
+
+    chunks, _ = layer._chunk_plan(
+        token_mask_row, segment_ids_row, sentence_end_mask_row, -1, 0,
+        content_trigger_row,
+    )
+
+    assert chunks[0].stop == 8
+    assert chunks[0].boundary is True
+
+
+def test_content_trigger_fires_from_real_clutch_signal():
+    """End-to-end: a layer whose clutch_projection is pushed to saturate
+    clutch above threshold, with content_triggered_settling on, must
+    produce more (shorter) chunks than the same layer with the feature
+    off -- proving the trigger genuinely reaches _chunk_plan through
+    _project_token_controls's real clutch output, not just the unit-level
+    _chunk_plan check above."""
+    torch.manual_seed(13)
+    layer = model(
+        num_banks=2, max_sentence_tokens=1000, intra_sentence_clutch_tokens=0,
+        content_triggered_settling=True, content_settle_threshold=0.5,
+        content_settle_min_gap=2,
+    ).layers[0]
+    with torch.no_grad():
+        layer.clutch_projection.weight.zero_()
+        layer.clutch_projection.bias.fill_(5.0)  # sigmoid(5) ~= 0.993 > 0.5 everywhere
+
+    batch, length = 1, 20
+    hidden = torch.randn(batch, length, layer.dim)
+    token_mask = torch.ones(batch, length, dtype=torch.bool)
+    segment_ids = torch.zeros(batch, length, dtype=torch.long)
+    sentence_end_mask = torch.zeros(batch, length, dtype=torch.bool)
+
+    clutch_controls = layer._project_token_controls(hidden)[1]
+    content_trigger = layer._content_trigger(clutch_controls)
+    assert content_trigger is not None
+    assert bool(content_trigger.all())
+
+    state = layer.initial_state(batch, hidden.device)
+    plan_on, _ = layer._chunk_plan(
+        token_mask[0], segment_ids[0], sentence_end_mask[0],
+        int(state.segment_id[0]), int(state.sentence_length[0]),
+        content_trigger[0],
+    )
+
+    object.__setattr__(layer.config, "content_triggered_settling", False)
+    plan_off, _ = layer._chunk_plan(
+        token_mask[0], segment_ids[0], sentence_end_mask[0],
+        int(state.segment_id[0]), int(state.sentence_length[0]),
+        None,
+    )
+
+    assert len(plan_on) > len(plan_off)
+    assert all(spec.stop - spec.start <= 2 for spec in plan_on[:-1])
+
+
+def test_forward_batched_and_segment_scan_agree_with_content_triggered_settling():
+    layer = model(
+        layers=1, num_banks=2, max_sentence_tokens=1000,
+        intra_sentence_clutch_tokens=0, learned_angular_velocity=False,
+        content_triggered_settling=True, content_settle_threshold=0.5,
+        content_settle_min_gap=3,
+    ).layers[0]
+    with torch.no_grad():
+        layer.clutch_projection.bias.fill_(3.0)
+
+    batch, length = 2, 30
+    token_mask = torch.ones(batch, length, dtype=torch.bool)
+    segment_ids = torch.zeros(batch, length, dtype=torch.long)
+    sentence_end_mask = torch.zeros(batch, length, dtype=torch.bool)
+    hidden = torch.randn(batch, length, layer.dim, requires_grad=True)
+    hidden_ref = hidden.detach().clone().requires_grad_(True)
+
+    new_output, new_state, _ = layer._forward_segment_scan(
+        hidden, token_mask, segment_ids, sentence_end_mask,
+        layer.initial_state(batch, hidden.device),
+        settling_enabled=True, cross_bank=True, commuting_only=False, use_load=True,
+    )
+    ref_output, ref_state, _ = layer._forward_batched(
+        hidden_ref.float(), token_mask, segment_ids, sentence_end_mask,
+        layer.initial_state(batch, hidden.device),
+        fixed_omega=True, settling_enabled=True, cross_bank=True,
+        commuting_only=False, use_load=True,
+    )
+
+    assert torch.allclose(new_output, ref_output, atol=1e-4, rtol=1e-4)
+    assert torch.allclose(new_state.rotor, ref_state.rotor, atol=1e-4, rtol=1e-4)
+    assert torch.equal(new_state.sentence_length, ref_state.sentence_length)
+
+
+def _memory_config(**overrides) -> PureParallelGearConfig:
+    values = {
+        "vocab_size": 50,
+        "dim": 16,
+        "num_banks": 1,
+        "fast_weight_banks": 2,
+        "fast_weight_key_dim": 4,
+        "fast_weight_value_dim": 4,
+        "fast_weight_chunk_tokens": 100,
+        "use_fast_weight_memory": True,
+    }
+    values.update(overrides)
+    return PureParallelGearConfig(**values)
+
+
+def test_consolidation_gate_defaults_off_and_uses_buffer():
+    off_memory = FastWeightMemory(_memory_config(unify_memory_consolidation=False))
+    assert not isinstance(off_memory.consolidation_gate, torch.nn.Parameter)
+
+    on_memory = FastWeightMemory(_memory_config(unify_memory_consolidation=True))
+    assert isinstance(on_memory.consolidation_gate, torch.nn.Parameter)
+
+
+def test_memory_chunk_plan_splits_at_sentence_boundary_only_when_enabled():
+    memory = FastWeightMemory(_memory_config(unify_memory_consolidation=True))
+    token_mask_row = torch.ones(10, dtype=torch.bool)
+    segment_ids_row = torch.zeros(10, dtype=torch.long)
+    sentence_end_mask_row = torch.zeros(10, dtype=torch.bool)
+    sentence_end_mask_row[4] = True
+
+    chunks_with_mask, _ = memory._memory_chunk_plan(
+        token_mask_row, segment_ids_row, -1, sentence_end_mask_row
+    )
+    assert chunks_with_mask[0].stop == 5
+    assert chunks_with_mask[0].boundary is True
+    assert chunks_with_mask[1].boundary is False
+
+    chunks_without_mask, _ = memory._memory_chunk_plan(
+        token_mask_row, segment_ids_row, -1, None
+    )
+    assert len(chunks_without_mask) == 1
+    assert chunks_without_mask[0].boundary is False
+
+
+def test_identity_consolidation_gate_matches_unsplit_memory():
+    """A pure chunk split, with no actual consolidation effect (gate
+    saturated near 1), must reproduce the exact accumulated matrix and
+    read values of not splitting there at all -- the rescale-cumsum
+    recurrence FastWeightMemory chunks is exact regardless of where it's
+    split; only the consolidation gate's *value* should ever matter."""
+    torch.manual_seed(0)
+    memory = FastWeightMemory(_memory_config(unify_memory_consolidation=True))
+    with torch.no_grad():
+        memory.consolidation_gate.fill_(10.0)
+
+    batch, length = 1, 10
+    hidden = torch.randn(batch, length, memory.config.dim)
+    token_embeddings = torch.randn(batch, length, memory.config.dim)
+    token_mask = torch.ones(batch, length, dtype=torch.bool)
+    segment_ids = torch.zeros(batch, length, dtype=torch.long)
+    sentence_end_mask = torch.zeros(batch, length, dtype=torch.bool)
+    sentence_end_mask[:, 4] = True
+    head = torch.nn.Linear(memory.config.dim, memory.config.vocab_size, bias=False)
+
+    with_split = memory(
+        hidden, token_embeddings, token_mask, segment_ids, head, None,
+        sentence_end_mask,
+    )
+    without_split = memory(
+        hidden, token_embeddings, token_mask, segment_ids, head, None, None,
+    )
+
+    assert torch.allclose(with_split[3].matrix, without_split[3].matrix, atol=1e-5)
+    assert torch.allclose(with_split[0], without_split[0], atol=1e-5)
+
+
+def test_strong_consolidation_gate_reduces_matrix_energy_at_boundary():
+    torch.manual_seed(0)
+    memory = FastWeightMemory(_memory_config(unify_memory_consolidation=True))
+    with torch.no_grad():
+        memory.consolidation_gate.fill_(-10.0)
+
+    batch, length = 1, 10
+    hidden = torch.randn(batch, length, memory.config.dim)
+    token_embeddings = torch.randn(batch, length, memory.config.dim)
+    token_mask = torch.ones(batch, length, dtype=torch.bool)
+    segment_ids = torch.zeros(batch, length, dtype=torch.long)
+    sentence_end_mask = torch.zeros(batch, length, dtype=torch.bool)
+    sentence_end_mask[:, 4] = True
+    head = torch.nn.Linear(memory.config.dim, memory.config.vocab_size, bias=False)
+
+    consolidated = memory(
+        hidden, token_embeddings, token_mask, segment_ids, head, None,
+        sentence_end_mask,
+    )
+    object.__setattr__(memory.config, "unify_memory_consolidation", False)
+    unconsolidated = memory(
+        hidden, token_embeddings, token_mask, segment_ids, head, None,
+        sentence_end_mask,
+    )
+
+    assert (
+        consolidated[3].matrix.square().sum()
+        < unconsolidated[3].matrix.square().sum()
+    )
+
+
+def test_consolidation_gate_receives_gradient():
+    torch.manual_seed(0)
+    memory = FastWeightMemory(_memory_config(unify_memory_consolidation=True))
+    batch, length = 2, 12
+    hidden = torch.randn(batch, length, memory.config.dim)
+    token_embeddings = torch.randn(batch, length, memory.config.dim)
+    token_mask = torch.ones(batch, length, dtype=torch.bool)
+    segment_ids = torch.zeros(batch, length, dtype=torch.long)
+    sentence_end_mask = torch.zeros(batch, length, dtype=torch.bool)
+    sentence_end_mask[:, 5] = True
+    head = torch.nn.Linear(memory.config.dim, memory.config.vocab_size, bias=False)
+
+    memory_out, logit_bias, gate, _, _ = memory(
+        hidden, token_embeddings, token_mask, segment_ids, head, None,
+        sentence_end_mask,
+    )
+    (memory_out.square().sum() + logit_bias.square().sum()).backward()
+    assert memory.consolidation_gate.grad is not None
+    assert bool(torch.isfinite(memory.consolidation_gate.grad).all())
+
+
+def test_parameter_count_formula_matches_with_memory_consolidation():
+    proxy_config = config(
+        num_banks=2, use_fast_weight_memory=True, unify_memory_consolidation=True,
+    )
+    instance = PureParallelGearLM(proxy_config)
+    real_total = sum(p.numel() for p in instance.parameters())
+    assert gear_parameter_count(proxy_config) == real_total
+
+
 def test_future_tokens_cannot_change_past_logits():
     instance = model().eval()
     tokens = torch.randint(0, 97, (1, 20))
@@ -1116,6 +1983,15 @@ def test_all_trainable_parameters_have_finite_gradients():
         name
         for name, parameter in instance.named_parameters()
         if parameter.requires_grad
+        # future_heads are excluded here, not because they can go dead
+        # without notice, but because this is a short (18-token) smoke
+        # sequence and large-horizon banks need a long enough sequence for
+        # any settle event to have an in-bounds, same-segment target --
+        # see test_future_rotor_objective_reaches_every_bank_head below
+        # for the dedicated, long-sequence version of this same check,
+        # mirroring bounded_hybrid_gear's established pattern for the
+        # identical tension (test_future_state_objective_reaches_every_bank_head).
+        and not name.startswith("future_heads.")
         and (
             parameter.grad is None
             or not bool(torch.isfinite(parameter.grad).all())
@@ -1123,6 +1999,36 @@ def test_all_trainable_parameters_have_finite_gradients():
         )
     ]
     assert bad == []
+
+
+def test_future_rotor_objective_reaches_every_bank_head():
+    instance = model(num_banks=4, max_sentence_tokens=20, intra_sentence_clutch_tokens=5)
+    tokens = torch.randint(0, 97, (2, 600))
+    metrics = instance.training_step(tokens)
+    assert float(metrics["future_rotor"].detach()) > 0.0
+    metrics["total"].backward()
+    assert all(
+        head.weight.grad is not None
+        and bool(torch.isfinite(head.weight.grad).all())
+        and float(head.weight.grad.norm()) > 0.0
+        for head in instance.future_heads
+    )
+
+
+def test_zero_weight_future_rotor_objective_is_not_executed(monkeypatch):
+    instance = model()
+    tokens = torch.randint(0, 97, (2, 32))
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("zero-weight future-rotor objective was executed")
+
+    monkeypatch.setattr(instance, "_future_loss", fail_if_called)
+    metrics = instance.training_step(
+        tokens,
+        loss_term_scales={"future_rotor": 0.0},
+    )
+    assert float(metrics["future_rotor"].detach()) == 0.0
+    metrics["total"].backward()
 
 
 def test_boundary_detector_handles_abbreviation_decimal_quote_and_cap():

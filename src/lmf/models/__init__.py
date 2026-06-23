@@ -18,6 +18,7 @@ from . import (  # noqa: F401  (import side-effect: registration)
     opet,
     pure_parallel_gear,
     rhca,
+    spectral_memory,
     transformer,
 )
 
@@ -32,5 +33,6 @@ __all__ = [
     "opet",
     "pure_parallel_gear",
     "rhca",
+    "spectral_memory",
     "transformer",
 ]

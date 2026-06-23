@@ -4,7 +4,14 @@ default_block: proxy
 base:
   seed: 20261000
   device: mps
-  precision: bf16
+  # Pure Gear forces FP32 parameters and execution on MPS. Declaring BF16 here
+  # previously made the Transformer baseline BF16 while Gear stayed FP32.
+  precision: fp32
+  data:
+    name: paired_document_manifest
+    manifest_root: outputs/pure_parallel_gear/360_proxy/train_seed_20262000
+    seed: 20261000
+    wrap: true
   model:
     name: pure_parallel_gear
     num_banks: 4

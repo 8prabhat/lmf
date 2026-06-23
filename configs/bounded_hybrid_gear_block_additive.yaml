@@ -7,6 +7,17 @@ base:
   precision: fp32
   data:
     name: pure_gear_contiguous_lanes
+    corpus_root: outputs/tokenizer/sentencepiece_bpe_prepared
+    index_root: outputs/pure_parallel_gear/360_proxy/index
+    tokenizer_name: sentencepiece_bpe_edu_subset_v1
+    domains:
+      - cosmopedia
+      - fineweb_edu
+      - open_web_math
+      - pes2o
+      - pg19
+      - stack_exchange
+      - wikipedia
     whole_windows: true
   trainer:
     name: bounded_hybrid_gear_block_additive
@@ -49,8 +60,12 @@ screen:
 
 confirmation:
   model:
-    dim: 128
-    layers: 4
+    # Confirmation extends the training budget at the parameter-matched
+    # screening shape; changing width here previously inherited heads=7 and
+    # produced an invalid 128 % 7 configuration.
+    dim: 112
+    layers: 2
+    ffn_dim: 349
   trainer:
     lr: 6.0e-4
     total_training_tokens: 1000000

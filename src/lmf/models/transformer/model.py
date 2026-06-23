@@ -458,7 +458,15 @@ class CachedTransformerLM(nn.Module):
         meta = task_metadata or {}
         attention_mask = meta.get("attention_mask")
         loss_mask = meta.get("loss_mask")
-        segment_ids = meta.get("segment_ids")
+        # Contiguous whole-document lanes explicitly certify that every row is
+        # one segment. Passing their IDs would build an unnecessary [N, N]
+        # mask and disable fused causal SDPA, biasing throughput comparisons
+        # against the full Transformer baseline.
+        segment_ids = (
+            None
+            if bool(meta.get("single_segment_rows", False))
+            else meta.get("segment_ids")
+        )
         hidden, _ = self._forward_hidden(
             tokens,
             attention_mask=attention_mask,

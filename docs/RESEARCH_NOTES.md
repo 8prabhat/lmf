@@ -83,7 +83,7 @@ convention as the table above:
 | `opet` | OPET | `transformer` baseline with phase-enriched token embeddings + coherence auxiliary loss | exploratory |
 | `gear_transformer` (alias `mlgt`) | Gear Transformer | full Transformer trunk + write/update/cross-gear-coupling/read gear side-channel | exploratory, beaten by param-matched Transformer |
 | `gear_only` | Gear Transformer | same gear mechanism with causal self-attention removed | exploratory, best on repeated-corpus smoke test |
-| `pure_parallel_gear` | Pure Parallel Gear | attention-free LM, fast-weight associative memory, constant-size generation cache | canonical first generation |
+| `pure_parallel_gear` | Pure Parallel Gear | attention-free rotor LM with optional fast-weight associative memory (disabled by default), constant-size generation cache | canonical first generation |
 | `pure_parallel_gear_v3` | Bounded Hybrid Gear | strict constant-state rotor model, no attention (ablation control within the family) | exploratory |
 | `hybrid_parallel_gear` | Bounded Hybrid Gear | `pure_parallel_gear_v3` plus fixed-window grouped-query local attention | exploratory |
 | `bounded_transformer` | Bounded Hybrid Gear | bounded local-attention trunk with no Gear memory (ablation control) | exploratory |

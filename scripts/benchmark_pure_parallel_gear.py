@@ -20,7 +20,7 @@ import torch.nn.functional as F
 
 from lmf.ablation.stats import percentile
 from lmf.core.device import sync
-from lmf.core.hashing import file_sha256
+from lmf.core.hashing import file_sha256, git_tree_sha256
 from lmf.core.io import atomic_write_json as write_json
 from lmf.core.seeding import (
     capture_rng_state,
@@ -139,6 +139,11 @@ def _gear_layer_parameter_count(
             and config.learned_angular_velocity
             else 0
         )
+        + (
+            2 * banks
+            if config.boundary_settling and config.adaptive_settling_depth
+            else 0
+        )
         + feature_dim
         + feature_dim * dim
         + 1
@@ -163,6 +168,20 @@ def _fast_weight_memory_parameter_count(config: PureParallelGearConfig) -> int:
         + (dim + bank_value) + 1  # gate_proj (weight + bias)
         + dim * bank_value  # memory_out_proj
         + 1  # memory_residual
+        + (
+            config.fast_weight_banks if config.unify_memory_consolidation else 0
+        )  # consolidation_gate (Phase 3.5)
+    )
+
+
+def _future_heads_parameter_count(config: PureParallelGearConfig) -> int:
+    """One bias-free Linear(gears_per_bank*rotor_channels*2 -> dim) per
+    bank, backing the training-only future-rotor auxiliary loss (Phase
+    3.1) -- never read at inference, see _inference_parameter_count."""
+    return (
+        config.num_banks
+        * (config.gears_per_bank * config.rotor_channels * 2)
+        * config.dim
     )
 
 
@@ -188,6 +207,7 @@ def gear_parameter_count(config: PureParallelGearConfig) -> int:
         )
         + config.dim
         + _fast_weight_memory_parameter_count(config)
+        + _future_heads_parameter_count(config)
     )
 
 
@@ -200,6 +220,17 @@ def _matched_gear(
     extra_config: dict | None = None,
 ) -> PureParallelGearConfig:
     extra_config = extra_config or {}
+    # Matches on the *inference-relevant* parameter count (total minus the
+    # training-only future_heads scaffold -- see _inference_parameter_count)
+    # since `target` is the Transformer baseline's total, and the
+    # Transformer has no equivalent training-only head to net against.
+    # Matching on the raw total here would silently shrink dim/ffn_dim to
+    # "pay for" future_heads, leaving the gear model under-resourced
+    # relative to the Transformer at the inference time that actually
+    # matters for a fair comparison.
+    def inference_count(cfg: PureParallelGearConfig) -> int:
+        return gear_parameter_count(cfg) - _future_heads_parameter_count(cfg)
+
     best: tuple[float, PureParallelGearConfig] | None = None
     for dim in range(max(16, int(0.55 * baseline_dim)), int(1.35 * baseline_dim) + 1):
         low = PureParallelGearConfig(
@@ -209,9 +240,9 @@ def _matched_gear(
             ffn_dim=dim,
             **extra_config,
         )
-        low_count = gear_parameter_count(low)
+        low_count = inference_count(low)
         high = replace(low, ffn_dim=dim + 1)
-        slope = gear_parameter_count(high) - low_count
+        slope = inference_count(high) - low_count
         if slope <= 0:
             continue
         estimate = max(dim, round(dim + (target - low_count) / slope))
@@ -219,7 +250,7 @@ def _matched_gear(
             if ffn > 8 * dim:
                 continue
             candidate = replace(low, ffn_dim=ffn)
-            count = gear_parameter_count(candidate)
+            count = inference_count(candidate)
             error = abs(count / target - 1.0)
             score = (
                 error,
@@ -309,13 +340,32 @@ def trainer_class(name: str):
     return BaseTrainer
 
 
+def _inference_parameter_count(model: torch.nn.Module) -> int:
+    """Parameter count restricted to what actually runs at inference.
+
+    `PureParallelGearLM.future_heads` backs a training-only auxiliary loss
+    (the future-rotor objective, Phase 3.1) that `_future_loss` only ever
+    reads from `training_step` -- never from `forward()` or generation. The
+    Transformer/GRU baselines being compared against here have no analogous
+    training-only head, so counting future_heads against the gear model
+    would penalize it for capacity it never uses to answer a query, making
+    this fairness check stricter than what it is meant to guarantee
+    (matched *inference-time* capacity).
+    """
+    total = count_parameters(model)
+    future_heads = getattr(model, "future_heads", None)
+    if future_heads is not None:
+        total -= count_parameters(future_heads)
+    return total
+
+
 def assert_fair_configs(configuration: dict[str, Any]) -> dict[str, Any]:
     models = {
         name: build_model(name, config, seed=1)
         for name, config in configuration.items()
     }
     parameters = {
-        name: count_parameters(model) for name, model in models.items()
+        name: _inference_parameter_count(model) for name, model in models.items()
     }
     baseline = parameters["transformer"]
     relative = {
@@ -862,7 +912,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--prior-gate", type=Path)
     parser.add_argument("--qualification", type=Path)
     parser.add_argument("--device", default="mps")
-    parser.add_argument("--precision", choices=("fp32", "bf16"), default="bf16")
+    parser.add_argument("--precision", choices=("fp32", "bf16"), default="fp32")
     parser.add_argument("--micro-batch-size", type=int, default=2)
     parser.add_argument("--max-validation-rows", type=int)
     parser.add_argument("--seed-start", type=int, default=20261000)
@@ -872,12 +922,27 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_args()
+    if args.device == "mps" and args.precision != "fp32":
+        raise RuntimeError(
+            "decisive Pure Gear comparisons on MPS require precision=fp32: "
+            "Pure Gear forces FP32 execution, so a BF16 setting would train "
+            "only the Transformer/GRU controls in lower precision"
+        )
     if args.device == "mps":
         if args.qualification is None:
             raise RuntimeError("MPS runs require --qualification")
         qualification = json.loads(args.qualification.read_text())
         if not qualification.get("qualified", False):
             raise RuntimeError("Pure Gear engineering qualification did not pass")
+        current_code_hash = git_tree_sha256()
+        qualified_code_hash = qualification.get("environment", {}).get(
+            "code_hash"
+        )
+        if qualified_code_hash != current_code_hash:
+            raise RuntimeError(
+                "Pure Gear qualification was produced by different code "
+                f"({qualified_code_hash} != {current_code_hash}); rerun it"
+            )
     if args.stage in {"15m", "50m"}:
         if args.prior_gate is None:
             raise RuntimeError(

@@ -5,9 +5,11 @@ from __future__ import annotations
 
 import argparse
 from contextlib import nullcontext
+import gc
 import json
 import platform
 import statistics
+import threading
 import time
 from pathlib import Path
 
@@ -35,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--device", default="mps")
-    parser.add_argument("--precision", choices=("fp32", "bf16"), default="bf16")
+    parser.add_argument("--precision", choices=("fp32", "bf16"), default="fp32")
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--seq-len", type=int, default=512)
     parser.add_argument("--context-len", type=int, default=4096)
@@ -212,27 +214,81 @@ def streaming_error(model, tokens, device, dtype):
 
 
 def throughput(model, tokens, device, dtype, repeats):
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=1e-4,
+        betas=(0.9, 0.95),
+        weight_decay=0.01,
+    )
     model.train()
+    optimizer.zero_grad(set_to_none=True)
     with precision_context(device, dtype):
         loss = model.training_step(tokens)["total"]
     loss.backward()
+    optimizer.step()
     model.zero_grad(set_to_none=True)
     sync(device)
     samples = []
+    peak_allocated = [current_allocated_bytes(device) or 0]
+    stop_sampling = threading.Event()
+
+    def sample_memory() -> None:
+        while not stop_sampling.is_set():
+            peak_allocated[0] = max(
+                peak_allocated[0],
+                current_allocated_bytes(device) or 0,
+            )
+            time.sleep(0.0005)
+
+    sampler = (
+        threading.Thread(target=sample_memory, daemon=True)
+        if device.type == "mps"
+        else None
+    )
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    if sampler is not None:
+        sampler.start()
     for _ in range(repeats):
+        optimizer.zero_grad(set_to_none=True)
         started = time.perf_counter()
         with precision_context(device, dtype):
             loss = model.training_step(tokens)["total"]
         loss.backward()
+        optimizer.step()
         sync(device)
         samples.append(time.perf_counter() - started)
-        model.zero_grad(set_to_none=True)
+    stop_sampling.set()
+    if sampler is not None:
+        sampler.join()
+    if device.type == "cuda":
+        peak_allocated[0] = int(torch.cuda.max_memory_allocated(device))
+    optimizer.zero_grad(set_to_none=True)
     seconds = statistics.median(samples)
     return {
         "median_step_seconds": seconds,
         "tokens_per_second": tokens.numel() / max(seconds, 1e-9),
         "samples": samples,
+        "peak_allocated_bytes": peak_allocated[0] or None,
+        "peak_memory_measurement": (
+            "polled_mps_current_allocated_memory_0.5ms"
+            if device.type == "mps"
+            else (
+                "torch.cuda.max_memory_allocated"
+                if device.type == "cuda"
+                else "unavailable"
+            )
+        ),
+        "includes_optimizer_step": True,
     }
+
+
+def current_allocated_bytes(device: torch.device) -> int | None:
+    if device.type == "mps":
+        return int(torch.mps.current_allocated_memory())
+    if device.type == "cuda":
+        return int(torch.cuda.memory_allocated(device))
+    return None
 
 
 @torch.no_grad()
@@ -253,12 +309,11 @@ def incremental_profile(
         device=device,
     )
     with precision_context(device, dtype):
-        if model.architecture_manifest()["name"] == "CachedTransformerLM":
-            _, cache = model(prompt, use_cache=True)
-        else:
-            _, cache = model(prompt, use_cache=True)
+        logits, cache = model(prompt, use_cache=True)
     sync(device)
-    token = prompt[:, -1:]
+    # Decode the model's first predicted continuation. Re-feeding the final
+    # prompt token measures a duplicated-token transition, not generation.
+    token = logits[:, -1].argmax(dim=-1, keepdim=True)
     samples = []
     for _ in range(generation_steps):
         started = time.perf_counter()
@@ -308,7 +363,8 @@ def main() -> None:
         "scan_proof": scan_proof(device),
         "models": {},
     }
-    for name, model in models.items():
+    for name in tuple(models):
+        model = models.pop(name)
         model = model.to(device)
         short_tokens = tokens[:, : min(64, args.seq_len)]
         manifest = model.architecture_manifest()
@@ -332,6 +388,14 @@ def main() -> None:
                 dtype=dtype,
             ),
         }
+        model.to("cpu")
+        del model
+        gc.collect()
+        if device.type == "mps":
+            torch.mps.synchronize()
+            torch.mps.empty_cache()
+        elif device.type == "cuda":
+            torch.cuda.empty_cache()
     baseline = report["models"]["full_transformer"]["training"][
         "tokens_per_second"
     ]
@@ -341,6 +405,9 @@ def main() -> None:
     ]["tokens_per_second"]
     baseline_cache = report["models"]["full_transformer"]["incremental"][
         "cache_bytes"
+    ]
+    baseline_peak = report["models"]["full_transformer"]["training"][
+        "peak_allocated_bytes"
     ]
     report["checks"] = {
         "scan_output_proof": report["scan_proof"]["output_max_error"] <= 1e-5,
@@ -419,6 +486,32 @@ def main() -> None:
             <= 0.25
         ),
     }
+    if baseline_peak:
+        report["checks"].update(
+            {
+                "strict_peak_memory_at_most_transformer": (
+                    report["models"]["strict_v3"]["training"][
+                        "peak_allocated_bytes"
+                    ]
+                    / baseline_peak
+                    <= 1.0
+                ),
+                "hybrid_peak_memory_at_most_80pct_transformer": (
+                    report["models"]["hybrid"]["training"][
+                        "peak_allocated_bytes"
+                    ]
+                    / baseline_peak
+                    <= 0.8
+                ),
+                "block_hybrid_gear_peak_memory_at_most_80pct_transformer": (
+                    report["models"]["block_hybrid_gear"]["training"][
+                        "peak_allocated_bytes"
+                    ]
+                    / baseline_peak
+                    <= 0.8
+                ),
+            }
+        )
     report["unresolved_bottlenecks"] = []
     for check, passed in report["checks"].items():
         if not passed:
@@ -443,6 +536,11 @@ def main() -> None:
         "block_hybrid_gear_generation_at_least_1_5x_transformer",
         "block_hybrid_gear_cache_at_most_quarter_transformer",
     )
+    if baseline_peak:
+        block_hybrid_gear_checks = (
+            *block_hybrid_gear_checks,
+            "block_hybrid_gear_peak_memory_at_most_80pct_transformer",
+        )
     report["block_hybrid_gear_qualified"] = all(
         report["checks"][name] for name in (*common_checks, *block_hybrid_gear_checks)
     )

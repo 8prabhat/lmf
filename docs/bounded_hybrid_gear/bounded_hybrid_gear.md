@@ -1,4 +1,4 @@
-# Pure Parallel Gear V3
+# Bounded Hybrid Gear
 
 V3 is a separate architecture family. V2 remains available as an immutable
 historical control.
@@ -56,6 +56,6 @@ history and KV caching as present. Checkpoints are architecture-specific and
 cannot be loaded across V2, V3, hybrid, or bounded Transformer families.
 
 The retrained ablation matrix is recorded in
-`configs/pure_parallel_gear_v3_ablations.yaml`. Legacy flattened-readout and
+`configs/bounded_hybrid_gear_ablations.yaml`. Legacy flattened-readout and
 boundary-settling controls intentionally use V2 rather than reintroducing
 removed mechanisms into the V3 production path.

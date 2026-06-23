@@ -22,7 +22,9 @@ from .. import models  # noqa: F401
 def cmd_train(args) -> None:
     cfg = load_config(args.config, args.block, args.env, args.set)
     corpus, model, trainer, run = _build(cfg)
-    steps = int(args.steps or run.get("steps", 200))
+    steps = int(
+        run.get("steps", 200) if args.steps is None else args.steps
+    )
     print(f"[train] family={cfg.model.get('name', 'rhca')} block={cfg.block} "
           f"params={sum(p.numel() for p in model.parameters()):,} steps={steps}")
     trainer.train_steps(steps, int(run.get("batch_size", 8)), int(run.get("seq_len", 256)),
@@ -70,7 +72,12 @@ def cmd_generate(args) -> None:
     result = model.generate(ids, args.max_new_tokens)
     # RHCA returns a GenerationResult; the transformer baseline returns a tensor.
     token_ids = result.token_ids[0] if hasattr(result, "token_ids") else result[0]
-    text = corpus.decode_text(token_ids) if hasattr(corpus, "decode_text") else None
+    if hasattr(corpus, "decode_text"):
+        text = corpus.decode_text(token_ids)
+    elif hasattr(corpus, "tokenizer") and hasattr(corpus.tokenizer, "decode"):
+        text = corpus.tokenizer.decode(token_ids.detach().cpu().tolist())
+    else:
+        text = None
     out = {"text": text, "tokens": token_ids.tolist()}
     if hasattr(result, "tokens_per_settle"):
         out["tokens_per_settle"] = round(result.tokens_per_settle, 3)

@@ -7,6 +7,17 @@ base:
   precision: bf16
   data:
     name: pure_gear_contiguous_lanes
+    corpus_root: outputs/tokenizer/sentencepiece_bpe_prepared
+    index_root: outputs/pure_parallel_gear/360_proxy/index
+    tokenizer_name: sentencepiece_bpe_edu_subset_v1
+    domains:
+      - cosmopedia
+      - fineweb_edu
+      - open_web_math
+      - pes2o
+      - pg19
+      - stack_exchange
+      - wikipedia
   trainer:
     name: pure_parallel_gear_v3
     stateful: true

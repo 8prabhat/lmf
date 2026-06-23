@@ -32,8 +32,9 @@ def _forward_language_model(model, batch: TrainingBatch):
     """Forward a causal LM while passing optional batch metadata it supports."""
     kwargs = {"attention_mask": batch.attention_mask}
     parameters = inspect.signature(model.forward).parameters
-    if "segment_ids" in parameters and "segment_ids" in batch.metadata:
-        kwargs["segment_ids"] = batch.metadata["segment_ids"]
+    for name in ("segment_ids", "sentence_end_mask"):
+        if name in parameters and name in batch.metadata:
+            kwargs[name] = batch.metadata[name]
     return model(batch.tokens, **kwargs)
 
 
@@ -282,8 +283,19 @@ def repetition_rate(model, corpus, batch_size=4, prompt_len=16, gen_len=64,
         for _ in range(n_batches):
             batch = _sample_batch(corpus, batch_size, prompt_len + gen_len, split).to(device)
             result = model.generate(batch.tokens[:, :prompt_len], gen_len, cfg)
+            if torch.is_tensor(result):
+                generated = result
+                lengths = torch.full(
+                    (result.shape[0],),
+                    result.shape[1],
+                    dtype=torch.long,
+                    device=result.device,
+                )
+            else:
+                generated = result.token_ids
+                lengths = result.generated_lengths
             for b in range(batch_size):
-                gen = result.token_ids[b, :int(result.generated_lengths[b])].tolist()
+                gen = generated[b, :int(lengths[b])].tolist()
                 if len(gen) < ngram:
                     continue
                 grams = [tuple(gen[i:i + ngram]) for i in range(len(gen) - ngram + 1)]

@@ -14,15 +14,16 @@ from pathlib import Path
 
 import torch
 
+from lmf.core.hashing import file_sha256, git_tree_sha256
 from lmf.core.io import atomic_write_json as write_json
 from lmf.data import PairedDocumentManifestCorpus
-from lmf.diagnostics import parameter_count as count_parameters
 from lmf.models.transformer import CachedTransformerLM, TransformerConfig
 
 try:
     from scripts.benchmark_pure_parallel_gear import (
         _configured_parameter_count,
         _context_length,
+        _inference_parameter_count,
         _matched_gear,
         _trainer,
         assert_fair_configs,
@@ -34,6 +35,7 @@ except ModuleNotFoundError:
     from benchmark_pure_parallel_gear import (
         _configured_parameter_count,
         _context_length,
+        _inference_parameter_count,
         _matched_gear,
         _trainer,
         assert_fair_configs,
@@ -62,7 +64,7 @@ def _check_fairness(configs, *, allow_retrieval: bool):
             for name, config in configs.items()
         }
         parameters = {
-            name: count_parameters(model) for name, model in models.items()
+            name: _inference_parameter_count(model) for name, model in models.items()
         }
         baseline = parameters["transformer"]
         relative = {
@@ -99,6 +101,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=20262000)
     parser.add_argument("--log-every", type=int, default=0)
     parser.add_argument("--fast-weight-memory", action="store_true")
+    parser.add_argument(
+        "--phase3-mechanisms",
+        action="store_true",
+        help=(
+            "Enable all four opt-in Phase 3 mechanisms (bank_settle_cadence, "
+            "adaptive_settling_depth, content_triggered_settling, "
+            "unify_memory_consolidation) on top of the future-rotor "
+            "auxiliary loss, which is already on by default. "
+            "unify_memory_consolidation is a no-op without fast-weight "
+            "memory actually existing, so this implies --fast-weight-memory."
+        ),
+    )
+    parser.add_argument("--qualification", type=Path)
     return parser.parse_args()
 
 
@@ -111,7 +126,27 @@ def configurations(vocab_size: int, args: argparse.Namespace):
         max_seq_len=4096,
     )
     target = _configured_parameter_count(CachedTransformerLM, transformer)
-    extra_config = {"use_fast_weight_memory": True} if args.fast_weight_memory else None
+    if abs(target / args.target_params - 1.0) > 0.02:
+        raise RuntimeError(
+            "requested --target-params is inconsistent with the explicit "
+            "Transformer width/depth/head shape: "
+            f"actual={target}, requested={args.target_params}. Adjust the "
+            "Transformer shape or target before running."
+        )
+    extra_config = None
+    if args.phase3_mechanisms:
+        extra_config = {
+            "use_fast_weight_memory": True,
+            "unify_memory_consolidation": True,
+            # Matches the default num_banks=4 -- PureParallelGearConfig
+            # validates this tuple's length against num_banks, and nothing
+            # here overrides num_banks away from its default.
+            "bank_settle_cadence": (1, 2, 4, 8),
+            "adaptive_settling_depth": True,
+            "content_triggered_settling": True,
+        }
+    elif args.fast_weight_memory:
+        extra_config = {"use_fast_weight_memory": True}
     gear = _matched_gear(
         target,
         vocab_size,
@@ -196,16 +231,44 @@ def train(name, config, args, *, lr, tokens, tuning):
 
 def main() -> None:
     args = parse_args()
+    if args.device == "mps" and args.precision != "fp32":
+        raise RuntimeError(
+            "Pure Gear forces FP32 on MPS; use precision=fp32 so the "
+            "Transformer baseline is trained with the same parameter dtype"
+        )
+    if args.device == "mps":
+        if args.qualification is None:
+            raise RuntimeError("MPS comparison requires --qualification")
+        qualification = json.loads(args.qualification.read_text())
+        if not qualification.get("qualified", False):
+            raise RuntimeError("Pure Gear engineering qualification did not pass")
+        current_code_hash = git_tree_sha256()
+        if qualification.get("environment", {}).get(
+            "code_hash"
+        ) != current_code_hash:
+            raise RuntimeError(
+                "Pure Gear qualification does not match the current code; "
+                "rerun qualification"
+            )
+    uses_fast_weight_memory = args.fast_weight_memory or args.phase3_mechanisms
     corpus = PairedDocumentManifestCorpus(str(args.train_manifest), wrap=True)
     configs = configurations(corpus.vocab_size, args)
-    fairness = _check_fairness(configs, allow_retrieval=args.fast_weight_memory)
+    fairness = _check_fairness(configs, allow_retrieval=uses_fast_weight_memory)
     limitations = [
         "single seed",
         "~1M parameters",
         f"{args.tokens}-token final budget",
         "not a 3M/15M/50M gate",
     ]
-    if args.fast_weight_memory:
+    if args.phase3_mechanisms:
+        limitations.append(
+            "gear has all four opt-in Phase 3 mechanisms enabled at once "
+            "(bank_settle_cadence, adaptive_settling_depth, "
+            "content_triggered_settling, unify_memory_consolidation) -- "
+            "none of these has its own paired-ablation validation yet, so "
+            "a win or loss here cannot be attributed to any one of them"
+        )
+    if uses_fast_weight_memory:
         limitations.append(
             "gear has fast-weight associative memory enabled (token_similarity/"
             "history_retrieval=True in its manifest) -- this is no longer a "
@@ -218,6 +281,7 @@ def main() -> None:
         "stage": "pure_parallel_gear_1m_comparison",
         "seed": args.seed,
         "tokens": args.tokens,
+        "target_parameters": args.target_params,
         "tuning_tokens": args.tuning_tokens,
         "models_compared": ("transformer", "gear"),
         "configs": {name: config.to_dict() for name, config in configs.items()},
@@ -227,6 +291,20 @@ def main() -> None:
         "lr_tuning": {},
         "models": {},
         "limitations": limitations,
+        "environment": {
+            "torch": torch.__version__,
+            "device": args.device,
+            "precision": args.precision,
+            "code_hash": git_tree_sha256(),
+        },
+        "qualification": (
+            None
+            if args.qualification is None
+            else {
+                "path": str(args.qualification),
+                "sha256": file_sha256(args.qualification),
+            }
+        ),
     }
     args.output_dir.mkdir(parents=True, exist_ok=True)
     write_json(args.output_dir / "results.partial.json", report)
@@ -272,7 +350,7 @@ def main() -> None:
             device=args.device,
             repeats=3,
         )
-        if name == "gear" and args.fast_weight_memory:
+        if name == "gear" and uses_fast_weight_memory:
             result["memory_gate_statistics"] = memory_gate_statistics(
                 trainer.raw_model,
                 args.test_manifest,

@@ -2,6 +2,11 @@
 
 Date: 2026-06-21
 
+> Superseded for decision-making by
+> `refactor_audit_20260621.md`. The refactor audit fixed cross-document Gear
+> context leakage and restored the full Transformer's fused causal training
+> path, so the performance and quality numbers below remain historical only.
+
 ## Architecture
 
 ```mermaid
